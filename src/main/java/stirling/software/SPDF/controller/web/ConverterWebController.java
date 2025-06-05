@@ -7,7 +7,6 @@ import org.springframework.web.servlet.ModelAndView;
 
 import io.swagger.v3.oas.annotations.Hidden;
 import io.swagger.v3.oas.annotations.tags.Tag;
-
 import stirling.software.common.util.CheckProgramInstall;
 
 @Controller
@@ -54,6 +53,13 @@ public class ConverterWebController {
     public String convertToPdfForm(Model model) {
         model.addAttribute("currentPage", "file-to-pdf");
         return "convert/file-to-pdf";
+    }
+
+    @GetMapping("/eml-to-pdf")
+    @Hidden
+    public String convertEmlToPdfForm(Model model) {
+        model.addAttribute("currentPage", "eml-to-pdf");
+        return "convert/eml-to-pdf";
     }
 
     // PDF TO......

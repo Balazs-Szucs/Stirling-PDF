@@ -28,6 +28,18 @@ public class FileToPdf {
             String fileName,
             boolean disableSanitize)
             throws IOException, InterruptedException {
+        return convertHtmlToPdf(
+                weasyprintPath, request, fileBytes, fileName, disableSanitize, null);
+    }
+
+    public static byte[] convertHtmlToPdf(
+            String weasyprintPath,
+            HTMLToPdfRequest request,
+            byte[] fileBytes,
+            String fileName,
+            boolean disableSanitize,
+            stirling.software.common.model.api.converters.EmlToPdfRequest emlRequest)
+            throws IOException, InterruptedException {
 
         Path tempOutputFile = Files.createTempFile("output_", ".pdf");
         Path tempInputFile = null;
@@ -53,6 +65,18 @@ public class FileToPdf {
             command.add("utf-8");
             command.add("-v");
             command.add("--pdf-forms");
+
+            // Add advanced options if EmlToPdfRequest is provided
+            if (emlRequest != null) {
+                // Note: WeasyPrint doesn't support --page-size, --margin-* as command line args
+                // These features are implemented via CSS in the HTML instead
+
+                // Zoom level if specified in the HTML request
+                if (request != null && request.getZoom() != 1.0f) {
+                    // Note: WeasyPrint doesn't support --zoom either, this is handled via CSS
+                }
+            }
+
             command.add(tempInputFile.toString());
             command.add(tempOutputFile.toString());
 
