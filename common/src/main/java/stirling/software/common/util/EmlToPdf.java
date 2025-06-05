@@ -30,7 +30,6 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
-
 import stirling.software.common.model.api.converters.EmlToPdfRequest;
 
 /**
