@@ -3,7 +3,6 @@ package stirling.software.common.model.api.converters;
 import org.springframework.web.multipart.MultipartFile;
 
 import io.swagger.v3.oas.annotations.media.Schema;
-
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
@@ -25,9 +24,11 @@ public class EmlToPdfRequest {
     private boolean includeAttachments = false;
 
     @Schema(
-            description = "Maximum attachment size in MB to include (default 10MB)",
+            description = "Maximum attachment size in MB to include (default 10MB, range: 1-100)",
             requiredMode = Schema.RequiredMode.NOT_REQUIRED,
-            example = "10")
+            example = "10",
+            minimum = "1",
+            maximum = "100")
     private int maxAttachmentSizeMB = 10;
 
     @Schema(
@@ -41,10 +42,4 @@ public class EmlToPdfRequest {
             requiredMode = Schema.RequiredMode.NOT_REQUIRED,
             example = "true")
     private boolean includeAllRecipients = true;
-
-    @Schema(
-            description = "Use modest formatting for the email content, avoiding complex styles.",
-            requiredMode = Schema.RequiredMode.NOT_REQUIRED,
-            example = "false")
-    private boolean useModestFormatting = false;
 }

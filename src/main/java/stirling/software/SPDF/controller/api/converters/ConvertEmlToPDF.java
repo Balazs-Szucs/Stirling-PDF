@@ -65,7 +65,7 @@ public class ConvertEmlToPDF {
 
             if (request.isDownloadHtml()) {
                 try {
-                    String htmlContent = EmlToPdf.convertEmlToHtml(fileBytes, originalFilename);
+                    String htmlContent = EmlToPdf.convertEmlToHtml(fileBytes, request);
 
                     HttpHeaders headers = new HttpHeaders();
                     headers.setContentType(MediaType.TEXT_HTML);
@@ -120,7 +120,7 @@ public class ConvertEmlToPDF {
                         .body("Conversion was interrupted".getBytes(StandardCharsets.UTF_8));
 
             } catch (Exception e) {
-                String errorMessage = getString(e);
+                String errorMessage = buildErrorMessage(e);
 
                 return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                         .body(errorMessage.getBytes(StandardCharsets.UTF_8));
@@ -138,7 +138,7 @@ public class ConvertEmlToPDF {
         }
     }
 
-    private static @NotNull String getString(Exception e) {
+    private static @NotNull String buildErrorMessage(Exception e) {
         String errorMessage;
         if (e.getMessage() != null && e.getMessage().contains("Invalid EML")) {
             errorMessage =
