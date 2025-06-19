@@ -89,39 +89,35 @@ public class EmlToPdf {
         private FileSizeConstants() {}
     }
 
-    // Cached Jakarta Mail availability check
-    private static Boolean jakartaMailAvailable = null;
+    // Angus Mail session for EML processing
+    private static Object mailSession = null;
 
-    private static boolean isJakartaMailAvailable() {
-        if (jakartaMailAvailable == null) {
-            try {
-                // Check for core Jakarta Mail classes
-                Class.forName("jakarta.mail.internet.MimeMessage");
-                Class.forName("jakarta.mail.Session");
-                Class.forName("jakarta.mail.internet.MimeUtility");
-                Class.forName("jakarta.mail.internet.MimePart");
-                Class.forName("jakarta.mail.internet.MimeMultipart");
-                Class.forName("jakarta.mail.Multipart");
-                Class.forName("jakarta.mail.Part");
+    private static Object initializeAngusMailSession() throws Exception {
+        // Configure properties for Angus Mail with explicit provider setup
+        Properties props = new Properties();
 
-                jakartaMailAvailable = true;
-                log.debug("Jakarta Mail libraries are available");
-            } catch (ClassNotFoundException e) {
-                jakartaMailAvailable = false;
-                log.debug("Jakarta Mail libraries are not available, using basic parsing");
-            }
-        }
-        return jakartaMailAvailable;
+        // Set Angus Mail as the provider for various protocols
+        props.setProperty("mail.store.protocol", "imap");
+        props.setProperty("mail.transport.protocol", "smtp");
+
+        // Explicitly configure Angus Mail providers
+        props.setProperty("mail.imap.class", "org.eclipse.angus.mail.imap.IMAPStore");
+        props.setProperty("mail.smtp.class", "org.eclipse.angus.mail.smtp.SMTPTransport");
+        props.setProperty("mail.pop3.class", "org.eclipse.angus.mail.pop3.POP3Store");
+
+        Class<?> sessionClass = Class.forName("jakarta.mail.Session");
+        Method getDefaultInstance = sessionClass.getMethod("getDefaultInstance", Properties.class);
+        return getDefaultInstance.invoke(null, props);
     }
 
     public static String convertEmlToHtml(byte[] emlBytes, EmlToPdfRequest request)
             throws IOException {
         validateEmlInput(emlBytes);
-
-        if (isJakartaMailAvailable()) {
+        try {
             return convertEmlToHtmlAdvanced(emlBytes, request);
-        } else {
-            return convertEmlToHtmlBasic(emlBytes, request);
+        } catch (Exception e) {
+            throw new IOException(
+                    "Failed to convert EML to HTML using Angus Mail: " + e.getMessage(), e);
         }
     }
 
@@ -137,16 +133,13 @@ public class EmlToPdf {
         validateEmlInput(emlBytes);
 
         try {
-            // Generate HTML representation
-            EmailContent emailContent = null;
+            // Generate HTML representation using Angus Mail
+            EmailContent emailContent;
             String htmlContent;
 
-            if (isJakartaMailAvailable()) {
-                emailContent = extractEmailContentAdvanced(emlBytes, request);
-                htmlContent = generateEnhancedEmailHtml(emailContent, request);
-            } else {
-                htmlContent = convertEmlToHtmlBasic(emlBytes, request);
-            }
+            log.debug("Using Angus Mail advanced parsing for EML file: {}", fileName);
+            emailContent = extractEmailContentAdvanced(emlBytes, request);
+            htmlContent = generateEnhancedEmailHtml(emailContent, request);
 
             // Convert HTML to PDF
             byte[] pdfBytes =
@@ -226,135 +219,27 @@ public class EmlToPdf {
         return "attachment_" + filename.hashCode() + "_" + System.nanoTime();
     }
 
-    private static String convertEmlToHtmlBasic(byte[] emlBytes, EmlToPdfRequest request) {
-        if (emlBytes == null || emlBytes.length == 0) {
-            throw new IllegalArgumentException("EML file is empty or null");
-        }
-
-        String emlContent = new String(emlBytes, StandardCharsets.UTF_8);
-
-        // Basic email parsing
-        String subject = extractBasicHeader(emlContent, "Subject:");
-        String from = extractBasicHeader(emlContent, "From:");
-        String to = extractBasicHeader(emlContent, "To:");
-        String cc = extractBasicHeader(emlContent, "Cc:");
-        String bcc = extractBasicHeader(emlContent, "Bcc:");
-        String date = extractBasicHeader(emlContent, "Date:");
-
-        // Try to extract HTML content
-        String htmlBody = extractHtmlBody(emlContent);
-        if (htmlBody == null) {
-            String textBody = extractTextBody(emlContent);
-            htmlBody =
-                    convertTextToHtml(
-                            textBody != null ? textBody : "Email content could not be parsed");
-        }
-
-        // Generate HTML with custom styling based on request
-        StringBuilder html = new StringBuilder();
-        html.append("<!DOCTYPE html>\n");
-        html.append("<html><head><meta charset=\"UTF-8\">\n");
-        html.append("<title>").append(escapeHtml(subject)).append("</title>\n");
-        html.append("<style>\n");
-        appendEnhancedStyles(html);
-        html.append("</style>\n");
-        html.append("</head><body>\n");
-
-        html.append("<div class=\"email-container\">\n");
-        html.append("<div class=\"email-header\">\n");
-        html.append("<h1>").append(escapeHtml(subject)).append("</h1>\n");
-        html.append("<div class=\"email-meta\">\n");
-        html.append("<div><strong>From:</strong> ").append(escapeHtml(from)).append("</div>\n");
-        html.append("<div><strong>To:</strong> ").append(escapeHtml(to)).append("</div>\n");
-
-        // Include CC and BCC if present and requested
-        if (request != null && request.isIncludeAllRecipients()) {
-            if (!cc.trim().isEmpty()) {
-                html.append("<div><strong>CC:</strong> ").append(escapeHtml(cc)).append("</div>\n");
-            }
-            if (!bcc.trim().isEmpty()) {
-                html.append("<div><strong>BCC:</strong> ")
-                        .append(escapeHtml(bcc))
-                        .append("</div>\n");
-            }
-        }
-
-        if (!date.trim().isEmpty()) {
-            html.append("<div><strong>Date:</strong> ").append(escapeHtml(date)).append("</div>\n");
-        }
-        html.append("</div></div>\n");
-
-        html.append("<div class=\"email-body\">\n");
-        html.append(processEmailHtmlBody(htmlBody));
-        html.append("</div>\n");
-
-        // Add attachment information - always check for and display attachments
-        String attachmentInfo = extractAttachmentInfo(emlContent);
-        if (!attachmentInfo.isEmpty()) {
-            html.append("<div class=\"attachment-section\">\n");
-            html.append("<h3>Attachments</h3>\n");
-            html.append(attachmentInfo);
-
-            // Add a status message about attachment inclusion
-            if (request != null && request.isIncludeAttachments()) {
-                html.append("<div class=\"attachment-inclusion-note\">\n");
-                html.append(
-                        "<p><strong>Note:</strong> Attachments are saved as external files and linked in this PDF. Click the links to open files externally.</p>\n");
-                html.append("</div>\n");
-            } else {
-                html.append("<div class=\"attachment-info-note\">\n");
-                html.append(
-                        "<p><em>Attachment information displayed - files not included in PDF. Enable 'Include attachments' to embed files.</em></p>\n");
-                html.append("</div>\n");
-            }
-
-            html.append("</div>\n");
-        }
-
-        // Show advanced features status if requested
-        assert request != null;
-        if (request.getFileInput().isEmpty()) {
-            html.append("<div class=\"advanced-features-notice\">\n");
-            html.append(
-                    "<p><em>Note: Some advanced features require Jakarta Mail dependencies.</em></p>\n");
-            html.append("</div>\n");
-        }
-
-        html.append("</div>\n");
-        html.append("</body></html>");
-
-        return html.toString();
-    }
-
     private static EmailContent extractEmailContentAdvanced(
-            byte[] emlBytes, EmlToPdfRequest request) {
-        try {
-            // Use Jakarta Mail for processing
-            Class<?> sessionClass = Class.forName("jakarta.mail.Session");
-            Class<?> mimeMessageClass = Class.forName("jakarta.mail.internet.MimeMessage");
-
-            Method getDefaultInstance =
-                    sessionClass.getMethod("getDefaultInstance", Properties.class);
-            Object session = getDefaultInstance.invoke(null, new Properties());
-
-            // Cast the session object to the proper type for the constructor
-            Class<?>[] constructorArgs = new Class<?>[] {sessionClass, InputStream.class};
-            Constructor<?> mimeMessageConstructor =
-                    mimeMessageClass.getConstructor(constructorArgs);
-            Object message =
-                    mimeMessageConstructor.newInstance(session, new ByteArrayInputStream(emlBytes));
-
-            return extractEmailContentAdvanced(message, request);
-
-        } catch (ReflectiveOperationException e) {
-            // Create basic EmailContent from basic processing
-            EmailContent content = new EmailContent();
-            content.setHtmlBody(convertEmlToHtmlBasic(emlBytes, request));
-            return content;
+            byte[] emlBytes, EmlToPdfRequest request) throws Exception {
+        if (mailSession == null) {
+            mailSession = initializeAngusMailSession();
         }
+
+        // Use the properly initialized Angus Mail session
+        Class<?> mimeMessageClass = Class.forName("jakarta.mail.internet.MimeMessage");
+        Class<?> sessionClass = Class.forName("jakarta.mail.Session");
+
+        // Cast the session object to the proper type for the constructor
+        Class<?>[] constructorArgs = new Class<?>[] {sessionClass, InputStream.class};
+        Constructor<?> mimeMessageConstructor = mimeMessageClass.getConstructor(constructorArgs);
+        Object message =
+                mimeMessageConstructor.newInstance(mailSession, new ByteArrayInputStream(emlBytes));
+
+        return extractEmailContentAdvanced(message, request);
     }
 
-    private static String convertEmlToHtmlAdvanced(byte[] emlBytes, EmlToPdfRequest request) {
+    private static String convertEmlToHtmlAdvanced(byte[] emlBytes, EmlToPdfRequest request)
+            throws Exception {
         EmailContent content = extractEmailContentAdvanced(emlBytes, request);
         return generateEnhancedEmailHtml(content, request);
     }
@@ -658,9 +543,30 @@ public class EmlToPdf {
 
         String processed = htmlBody;
 
-        // Remove problematic CSS
+        // Remove problematic CSS properties that cause WeasyPrint warnings
         processed = processed.replaceAll("(?i)\\s*position\\s*:\\s*fixed[^;]*;?", "");
         processed = processed.replaceAll("(?i)\\s*position\\s*:\\s*absolute[^;]*;?", "");
+
+        // Remove word-break CSS properties with empty or invalid values that cause WeasyPrint
+        // warnings
+        processed = processed.replaceAll("(?i)\\s*word-break\\s*:\\s*[^;]*;?", "");
+        processed =
+                processed.replaceAll(
+                        "(?i)\\s*word-wrap\\s*:\\s*break-word\\s*;?", "word-wrap: break-word;");
+
+        // Remove other potentially problematic CSS that can cause WeasyPrint issues
+        processed = processed.replaceAll("(?i)\\s*-webkit-[^:]*\\s*:[^;]*;?", "");
+        processed = processed.replaceAll("(?i)\\s*-moz-[^:]*\\s*:[^;]*;?", "");
+        processed = processed.replaceAll("(?i)\\s*-ms-[^:]*\\s*:[^;]*;?", "");
+        processed = processed.replaceAll("(?i)\\s*-o-[^:]*\\s*:[^;]*;?", "");
+
+        // Remove CSS properties with empty values that cause warnings
+        processed = processed.replaceAll("(?i)\\s*[a-z-]+\\s*:\\s*;", "");
+
+        // Clean up multiple semicolons and empty CSS rules
+        processed = processed.replaceAll(";+", ";");
+        processed = processed.replaceAll("\\{\\s*;", "{");
+        processed = processed.replaceAll(";\\s*\\}", "}");
 
         // Process inline images (cid: references) if we have email content with attachments
         if (emailContent != null && !emailContent.getAttachments().isEmpty()) {
@@ -1547,18 +1453,17 @@ public class EmlToPdf {
         }
 
         try {
-            if (isJakartaMailAvailable()) {
-                // Use Jakarta Mail's MimeUtility for proper MIME decoding
-                Class<?> mimeUtilityClass = Class.forName("jakarta.mail.internet.MimeUtility");
-                Method decodeText = mimeUtilityClass.getMethod("decodeText", String.class);
-                return (String) decodeText.invoke(null, headerValue.trim());
-            } else {
-                // Fallback to basic MIME decoding
-                return decodeMimeHeader(headerValue.trim());
-            }
+            // Use Angus Mail's MimeUtility for proper MIME decoding
+            Class<?> mimeUtilityClass = Class.forName("jakarta.mail.internet.MimeUtility");
+            Method decodeText = mimeUtilityClass.getMethod("decodeText", String.class);
+            return (String) decodeText.invoke(null, headerValue.trim());
         } catch (Exception e) {
-            log.warn("Failed to decode MIME header, using original: {}", headerValue, e);
-            return headerValue;
+            log.warn(
+                    "Failed to decode MIME header with Angus Mail, using fallback: {}",
+                    headerValue,
+                    e);
+            // Fallback to basic MIME decoding
+            return decodeMimeHeader(headerValue.trim());
         }
     }
 
@@ -1612,6 +1517,53 @@ public class EmlToPdf {
             log.debug("Jakarta Mail Multipart interface not available for validation");
             return false;
         }
+    }
+
+    public static void debugAngusMailSetup() {
+        log.info("=== Angus Mail Debug Information ===");
+
+        try {
+            // Check if core classes are available
+            Class.forName("jakarta.mail.internet.MimeMessage");
+            log.info("✓ jakarta.mail.internet.MimeMessage is available");
+
+            Class.forName("jakarta.mail.Session");
+            log.info("✓ jakarta.mail.Session is available");
+
+            // Check Angus Mail specific classes
+            try {
+                Class.forName("org.eclipse.angus.mail.smtp.SMTPProvider");
+                log.info("✓ org.eclipse.angus.mail.smtp.SMTPProvider is available");
+            } catch (ClassNotFoundException e) {
+                log.warn("✗ org.eclipse.angus.mail.smtp.SMTPProvider is NOT available");
+            }
+
+            try {
+                Class.forName("org.eclipse.angus.mail.imap.IMAPStore");
+                log.info("✓ org.eclipse.angus.mail.imap.IMAPStore is available");
+            } catch (ClassNotFoundException e) {
+                log.warn("✗ org.eclipse.angus.mail.imap.IMAPStore is NOT available");
+            }
+
+            // Try to create a session
+            Object session = initializeAngusMailSession();
+            log.info("✓ Successfully created Angus Mail session: {}", session.getClass().getName());
+
+            // Get providers
+            Class<?> sessionClass = session.getClass();
+            Method getProviders = sessionClass.getMethod("getProviders");
+            Object[] providers = (Object[]) getProviders.invoke(session);
+            log.info("Available providers count: {}", providers.length);
+
+            for (Object provider : providers) {
+                log.info("Provider: {}", provider.toString());
+            }
+
+        } catch (Exception e) {
+            log.error("Angus Mail setup failed: {}", e.getMessage(), e);
+        }
+
+        log.info("=== End Angus Mail Debug ===");
     }
 
     @Data
