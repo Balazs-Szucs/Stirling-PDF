@@ -348,6 +348,12 @@
         const url = URL.createObjectURL(blob);
         window.open(url, '_blank');
         return;
+      } else if (downloadOption === 'openInStirling') {
+        const url = URL.createObjectURL(blob);
+        const contextPath = /*[[${@contextPath}]]*/ '';
+        const viewerUrl = `${contextPath}/view-pdf?file=${encodeURIComponent(url)}`;
+        window.open(viewerUrl, '_blank');
+        return;
       }
     }
     if (!isZip) {

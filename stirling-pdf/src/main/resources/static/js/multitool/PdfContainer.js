@@ -809,6 +809,11 @@ class PdfContainer {
       } else if (downloadOption === 'newWindow') {
         // Open the file in a new window
         window.open(url, '_blank');
+      } else if (downloadOption === 'openInStirling') {
+        // Open the file in Stirling's PDF viewer
+        const contextPath = /*[[${@contextPath}]]*/ '';
+        const viewerUrl = `${contextPath}/view-pdf?file=${encodeURIComponent(url)}`;
+        window.open(viewerUrl, '_blank');
       } else {
         // Download the file
         this.downloadLink = document.createElement('a');

@@ -23,6 +23,10 @@ async function downloadFilesWithCallback(processFileCallback) {
         window.location.href = url;
       } else if (downloadOption === "newWindow") {
         window.open(url, "_blank");
+      } else if (downloadOption === "openInStirling") {
+        const contextPath = /*[[${@contextPath}]]*/ '';
+        const viewerUrl = `${contextPath}/view-pdf?file=${encodeURIComponent(url)}`;
+        window.open(viewerUrl, '_blank');
       } else {
         const downloadLink = document.createElement("a");
         downloadLink.href = url;
