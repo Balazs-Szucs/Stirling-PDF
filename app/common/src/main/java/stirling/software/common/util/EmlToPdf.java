@@ -2,7 +2,12 @@ package stirling.software.common.util;
 
 import static stirling.software.common.util.AttachmentUtils.setCatalogViewerPreferences;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.Charset;
@@ -138,11 +143,11 @@ public class EmlToPdf {
     }
 
     // Cached Jakarta Mail availability check and reflection methods
-    private static Boolean jakartaMailAvailable = null;
-    private static Method mimeUtilityDecodeTextMethod = null;
-    private static boolean mimeUtilityChecked = false;
+    private static volatile Boolean jakartaMailAvailable = null;
+    private static volatile Method mimeUtilityDecodeTextMethod = null;
+    private static volatile boolean mimeUtilityChecked = false;
 
-    private static boolean isJakartaMailAvailable() {
+    private static synchronized boolean isJakartaMailAvailable() {
         if (jakartaMailAvailable == null) {
             try {
                 // Check for core Jakarta Mail classes
@@ -651,8 +656,22 @@ public class EmlToPdf {
     private static boolean isInvalidEmlFormat(byte[] emlBytes) {
         try {
             int checkLength = Math.min(emlBytes.length, StyleConstants.EML_CHECK_LENGTH);
-            String content = new String(emlBytes, 0, checkLength, StandardCharsets.UTF_8);
-            String lowerContent = content.toLowerCase();
+            // Try UTF-8 first, then fallback to ISO-8859-1 for better charset handling
+            String content;
+            try {
+                content = new String(emlBytes, 0, checkLength, StandardCharsets.UTF_8);
+                // Validate that UTF-8 decoding was successful by checking for replacement
+                // characters
+                if (content.contains("\uFFFD")) {
+                    // UTF-8 failed, try ISO-8859-1
+                    content = new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
+                }
+            } catch (Exception e) {
+                // Fallback to ISO-8859-1 if UTF-8 fails
+                content = new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
+            }
+
+            String lowerContent = content.toLowerCase(Locale.ROOT);
 
             boolean hasFrom =
                     lowerContent.contains("from:") || lowerContent.contains("return-path:");
@@ -679,6 +698,7 @@ public class EmlToPdf {
             return headerCount < StyleConstants.MIN_HEADER_COUNT_FOR_VALID_EML && !hasMimeStructure;
 
         } catch (RuntimeException e) {
+            log.warn("Error validating EML format: {}", e.getMessage());
             return false;
         }
     }
@@ -1100,12 +1120,23 @@ public class EmlToPdf {
                         processMultipartAdvanced(
                                 messageContent, content, request, customHtmlSanitizer);
                     }
-                } catch (Exception e) {
-                    log.warn("Error processing content: {}", e.getMessage());
+                } catch (ReflectiveOperationException e) {
+                    log.warn(
+                            "Error processing multipart content via reflection: {}",
+                            e.getMessage());
                 }
             }
 
-        } catch (Exception e) {
+        } catch (ReflectiveOperationException e) {
+            log.warn(
+                    "Error extracting email content via Jakarta Mail reflection: {}",
+                    e.getMessage());
+            content.setSubject("Email Conversion");
+            content.setFrom("Unknown");
+            content.setTo("Unknown");
+            content.setTextBody("Email content could not be parsed with advanced processing");
+        } catch (RuntimeException e) {
+            log.warn("Unexpected error during email content extraction: {}", e.getMessage());
             content.setSubject("Email Conversion");
             content.setFrom("Unknown");
             content.setTo("Unknown");
@@ -1138,7 +1169,11 @@ public class EmlToPdf {
                 processPartAdvanced(part, content, request, customHtmlSanitizer);
             }
 
-        } catch (Exception e) {
+        } catch (ReflectiveOperationException e) {
+            log.warn("Error processing multipart via reflection: {}", e.getMessage());
+            content.setTextBody("Email content could not be parsed with advanced processing");
+        } catch (ClassCastException e) {
+            log.warn("Unexpected type encountered in multipart processing: {}", e.getMessage());
             content.setTextBody("Email content could not be parsed with advanced processing");
         }
     }
@@ -1193,10 +1228,12 @@ public class EmlToPdf {
                     // Check if it's an embedded image
                     String[] contentIdHeaders =
                             (String[]) getHeader.invoke(part, MimeConstants.HEADER_CONTENT_ID);
-                    if (contentIdHeaders != null && contentIdHeaders.length > 0) {
+                    if (contentIdHeaders != null
+                            && contentIdHeaders.length > 0
+                            && contentIdHeaders[0] != null) {
                         attachment.setEmbedded(true);
                         // Store the Content-ID, removing angle brackets if present
-                        String contentId = contentIdHeaders[0];
+                        String contentId = contentIdHeaders[0].trim();
                         if (contentId.startsWith("<") && contentId.endsWith(">")) {
                             contentId = contentId.substring(1, contentId.length() - 1);
                         }
@@ -1218,6 +1255,9 @@ public class EmlToPdf {
                                     log.warn(
                                             "Failed to read InputStream attachment: {}",
                                             e.getMessage());
+                                } catch (OutOfMemoryError e) {
+                                    log.warn(
+                                            "Out of memory reading attachment: {}", e.getMessage());
                                 }
                             } else if (attachmentContent instanceof byte[] byteArray) {
                                 attachmentData = byteArray;
@@ -1246,7 +1286,7 @@ public class EmlToPdf {
                                     }
                                 }
                             }
-                        } catch (Exception e) {
+                        } catch (ReflectiveOperationException e) {
                             log.warn("Error extracting attachment data: {}", e.getMessage());
                         }
                     }
@@ -1254,22 +1294,26 @@ public class EmlToPdf {
                     // Add attachment to the list for display (with or without data)
                     content.getAttachments().add(attachment);
                 }
-            } else if ((Boolean) isMimeType.invoke(part, MimeConstants.MULTIPART_PREFIX + "*")) {
+            } else if ((Boolean) isMimeType.invoke(part, "multipart/*")) {
                 // Handle nested multipart content
                 try {
                     Object multipartContent = getContent.invoke(part);
-                    Class<?> multipartClass = Class.forName("jakarta.mail.Multipart");
-                    if (multipartClass.isInstance(multipartContent)) {
-                        processMultipartAdvanced(
-                                multipartContent, content, request, customHtmlSanitizer);
+                    if (multipartContent != null) {
+                        Class<?> multipartClass = Class.forName("jakarta.mail.Multipart");
+                        if (multipartClass.isInstance(multipartContent)) {
+                            processMultipartAdvanced(
+                                    multipartContent, content, request, customHtmlSanitizer);
+                        }
                     }
-                } catch (Exception e) {
+                } catch (ReflectiveOperationException e) {
                     log.warn("Error processing multipart content: {}", e.getMessage());
                 }
             }
 
-        } catch (Exception e) {
-            log.warn("Error processing multipart part: {}", e.getMessage());
+        } catch (ReflectiveOperationException e) {
+            log.warn("Error processing multipart part via reflection: {}", e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("Unexpected error processing multipart part: {}", e.getMessage());
         }
     }
 
@@ -1476,18 +1520,22 @@ public class EmlToPdf {
 
             @Override
             public byte @NotNull [] getBytes() {
-                return attachment.getData();
+                return attachment.getData() != null ? attachment.getData() : new byte[0];
             }
 
             @Override
             public @NotNull InputStream getInputStream() {
-                return new ByteArrayInputStream(attachment.getData());
+                byte[] data = attachment.getData();
+                return new ByteArrayInputStream(data != null ? data : new byte[0]);
             }
 
             @Override
             public void transferTo(@NotNull File dest) throws IOException, IllegalStateException {
                 try (FileOutputStream fos = new java.io.FileOutputStream(dest)) {
-                    fos.write(attachment.getData());
+                    byte[] data = attachment.getData();
+                    if (data != null) {
+                        fos.write(data);
+                    }
                 }
             }
         };
@@ -1540,7 +1588,6 @@ public class EmlToPdf {
                 PDComplexFileSpecification fileSpecification = new PDComplexFileSpecification();
                 fileSpecification.setFile(filename);
                 fileSpecification.setFileUnicode(filename);
-                fileSpecification.setFileDescription("Email attachment: " + filename);
                 fileSpecification.setEmbeddedFile(embeddedFile);
                 fileSpecification.setEmbeddedFileUnicode(embeddedFile);
 
@@ -1601,11 +1648,13 @@ public class EmlToPdf {
         try {
             PDAppearanceDictionary appearance = new PDAppearanceDictionary();
             PDAppearanceStream normalAppearance = new PDAppearanceStream(document);
-            normalAppearance.setBBox(new PDRectangle(0, 0, 0, 0)); // Zero-size bounding box
+            // Use minimal size instead of zero to ensure clickable area exists
+            normalAppearance.setBBox(new PDRectangle(0, 0, 1, 1)); // Minimal bounding box
 
             appearance.setNormalAppearance(normalAppearance);
             fileAnnotation.setAppearance(appearance);
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
+            log.warn("Failed to set appearance for attachment annotation: {}", e.getMessage());
             // If appearance manipulation fails, just set it to null
             fileAnnotation.setAppearance(null);
         }
@@ -1695,13 +1744,19 @@ public class EmlToPdf {
         return decodeMimeHeader(headerValue.trim());
     }
 
-    private static void initializeMimeUtilityDecoding() {
+    private static synchronized void initializeMimeUtilityDecoding() {
+        if (mimeUtilityChecked) {
+            return; // Already initialized
+        }
+
         try {
             Class<?> mimeUtilityClass = Class.forName("jakarta.mail.internet.MimeUtility");
             mimeUtilityDecodeTextMethod = mimeUtilityClass.getMethod("decodeText", String.class);
             log.debug("Jakarta Mail MimeUtility.decodeText method available");
-        } catch (Exception e) {
-            log.debug("Jakarta Mail MimeUtility.decodeText method not available, using fallback");
+        } catch (ClassNotFoundException | NoSuchMethodException e) {
+            log.debug(
+                    "Jakarta Mail MimeUtility.decodeText method not available, using fallback: {}",
+                    e.getMessage());
             mimeUtilityDecodeTextMethod = null;
         }
         mimeUtilityChecked = true;
@@ -1727,20 +1782,28 @@ public class EmlToPdf {
 
                 try {
                     String decodedValue;
-                    if ("B".equals(encoding)) {
-                        // Base64 decoding
-                        byte[] decodedBytes = Base64.getDecoder().decode(encodedValue);
-                        decodedValue = new String(decodedBytes, Charset.forName(charset));
-                    } else if ("Q".equals(encoding)) {
-                        // Quoted-printable decoding
-                        decodedValue = decodeQuotedPrintable(encodedValue, charset);
-                    } else {
-                        // Unknown encoding, keep original
-                        decodedValue = matcher.group(0);
+                    switch (encoding) {
+                        case "B":
+                            // Base64 decoding
+                            byte[] decodedBytes = Base64.getDecoder().decode(encodedValue);
+                            decodedValue = new String(decodedBytes, Charset.forName(charset));
+                            break;
+                        case "Q":
+                            // Quoted-printable decoding
+                            decodedValue = decodeQuotedPrintable(encodedValue, charset);
+                            break;
+                        default:
+                            // Unknown encoding, keep original
+                            decodedValue = matcher.group(0);
+                            break;
                     }
                     result.append(decodedValue);
-                } catch (Exception e) {
-                    log.warn("Failed to decode MIME header part: {}", matcher.group(0), e);
+                } catch (IllegalArgumentException e) {
+                    log.debug("Failed to decode MIME header part: {}", matcher.group(0), e);
+                    // If decoding fails, keep the original encoded text
+                    result.append(matcher.group(0));
+                } catch (RuntimeException e) {
+                    log.warn("Unexpected error decoding MIME header part: {}", matcher.group(0), e);
                     // If decoding fails, keep the original encoded text
                     result.append(matcher.group(0));
                 }
