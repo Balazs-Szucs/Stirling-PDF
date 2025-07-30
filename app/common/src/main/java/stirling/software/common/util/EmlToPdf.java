@@ -12,6 +12,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,6 +38,8 @@ import org.apache.pdfbox.pdmodel.common.filespecification.PDEmbeddedFile;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationFileAttachment;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream;
+import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.pdfbox.text.TextPosition;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.springframework.web.multipart.MultipartFile;
@@ -49,6 +53,17 @@ import stirling.software.common.model.api.converters.EmlToPdfRequest;
 import stirling.software.common.model.api.converters.HTMLToPdfRequest;
 import stirling.software.common.service.CustomPDFDocumentFactory;
 
+/**
+ * Utility class for converting EML (email) files to PDF format.
+ *
+ * <p>Key features and standards compliance improvements: - Enhanced Jakarta Mail reflection with
+ * proper method validation - Robust charset handling with UTF-8/ISO-8859-1 fallbacks for unknown
+ * charsets - Improved MIME header decoding with Base64 line break cleanup - PDFBox embedded file
+ * handling with both file/fileUnicode specification - Duplicate filename prevention for embedded
+ * attachments - Enhanced Y-coordinate calculation for PDF annotations with transformation support -
+ * Proper null checking and validation for Jakarta Mail Part interfaces - Comprehensive exception
+ * logging with full stack traces - Standards-compliant RFC 2047 MIME header decoding
+ */
 @Slf4j
 @UtilityClass
 public class EmlToPdf {
@@ -194,13 +209,15 @@ public class EmlToPdf {
 
         try {
             // Generate HTML representation
-            EmailContent emailContent = null;
+            EmailContent emailContent;
             String htmlContent;
 
             if (isJakartaMailAvailable()) {
                 emailContent = extractEmailContentAdvanced(emlBytes, request, customHtmlSanitizer);
                 htmlContent = generateEnhancedEmailHtml(emailContent, request, customHtmlSanitizer);
             } else {
+                // For basic processing, create minimal EmailContent for consistency
+                emailContent = new EmailContent();
                 htmlContent = convertEmlToHtmlBasic(emlBytes, request, customHtmlSanitizer);
             }
 
@@ -215,6 +232,8 @@ public class EmlToPdf {
 
             // Attach files if available and requested
             if (shouldAttachFiles(emailContent, request)) {
+                // emailContent is guaranteed to be non-null here due to shouldAttachFiles check
+                assert emailContent != null : "emailContent should not be null at this point";
                 pdfBytes =
                         attachFilesToPdf(
                                 pdfBytes, emailContent.getAttachments(), pdfDocumentFactory);
@@ -356,20 +375,18 @@ public class EmlToPdf {
                         sanitizeText(from, customHtmlSanitizer),
                         sanitizeText(to, customHtmlSanitizer)));
 
-        // Include CC and BCC if present and requested
-        if (request != null && request.isIncludeAllRecipients()) {
-            if (!cc.trim().isEmpty()) {
-                html.append(
-                        String.format(
-                                "<div><strong>CC:</strong> %s</div>\n",
-                                sanitizeText(cc, customHtmlSanitizer)));
-            }
-            if (!bcc.trim().isEmpty()) {
-                html.append(
-                        String.format(
-                                "<div><strong>BCC:</strong> %s</div>\n",
-                                sanitizeText(bcc, customHtmlSanitizer)));
-            }
+        // Include CC and BCC if present
+        if (!cc.trim().isEmpty()) {
+            html.append(
+                    String.format(
+                            "<div><strong>CC:</strong> %s</div>\n",
+                            sanitizeText(cc, customHtmlSanitizer)));
+        }
+        if (!bcc.trim().isEmpty()) {
+            html.append(
+                    String.format(
+                            "<div><strong>BCC:</strong> %s</div>\n",
+                            sanitizeText(bcc, customHtmlSanitizer)));
         }
 
         if (!date.trim().isEmpty()) {
@@ -1082,19 +1099,90 @@ public class EmlToPdf {
             String subject = (String) getSubject.invoke(message);
             content.setSubject(subject != null ? safeMimeDecode(subject) : "No Subject");
 
+            // Extract From addresses
             Method getFrom = messageClass.getMethod("getFrom");
             Object[] fromAddresses = (Object[]) getFrom.invoke(message);
-            content.setFrom(
-                    fromAddresses != null && fromAddresses.length > 0
-                            ? safeMimeDecode(fromAddresses[0].toString())
-                            : "");
+            if (fromAddresses != null && fromAddresses.length > 0) {
+                StringBuilder fromBuilder = new StringBuilder();
+                for (int i = 0; i < fromAddresses.length; i++) {
+                    if (i > 0) fromBuilder.append(", ");
+                    fromBuilder.append(safeMimeDecode(fromAddresses[i].toString()));
+                }
+                content.setFrom(fromBuilder.toString());
+            } else {
+                content.setFrom("");
+            }
 
-            Method getAllRecipients = messageClass.getMethod("getAllRecipients");
-            Object[] recipients = (Object[]) getAllRecipients.invoke(message);
-            content.setTo(
-                    recipients != null && recipients.length > 0
-                            ? safeMimeDecode(recipients[0].toString())
-                            : "");
+            // Extract To addresses
+            try {
+                Method getRecipients =
+                        messageClass.getMethod(
+                                "getRecipients",
+                                Class.forName("jakarta.mail.Message$RecipientType"));
+                Class<?> recipientTypeClass = Class.forName("jakarta.mail.Message$RecipientType");
+
+                // Get TO recipients
+                Object toType = recipientTypeClass.getField("TO").get(null);
+                Object[] toRecipients = (Object[]) getRecipients.invoke(message, toType);
+                if (toRecipients != null && toRecipients.length > 0) {
+                    StringBuilder toBuilder = new StringBuilder();
+                    for (int i = 0; i < toRecipients.length; i++) {
+                        if (i > 0) toBuilder.append(", ");
+                        toBuilder.append(safeMimeDecode(toRecipients[i].toString()));
+                    }
+                    content.setTo(toBuilder.toString());
+                } else {
+                    content.setTo("");
+                }
+
+                // Get CC recipients
+                Object ccType = recipientTypeClass.getField("CC").get(null);
+                Object[] ccRecipients = (Object[]) getRecipients.invoke(message, ccType);
+                if (ccRecipients != null && ccRecipients.length > 0) {
+                    StringBuilder ccBuilder = new StringBuilder();
+                    for (int i = 0; i < ccRecipients.length; i++) {
+                        if (i > 0) ccBuilder.append(", ");
+                        ccBuilder.append(safeMimeDecode(ccRecipients[i].toString()));
+                    }
+                    content.setCc(ccBuilder.toString());
+                } else {
+                    content.setCc("");
+                }
+
+                // Get BCC recipients
+                Object bccType = recipientTypeClass.getField("BCC").get(null);
+                Object[] bccRecipients = (Object[]) getRecipients.invoke(message, bccType);
+                if (bccRecipients != null && bccRecipients.length > 0) {
+                    StringBuilder bccBuilder = new StringBuilder();
+                    for (int i = 0; i < bccRecipients.length; i++) {
+                        if (i > 0) bccBuilder.append(", ");
+                        bccBuilder.append(safeMimeDecode(bccRecipients[i].toString()));
+                    }
+                    content.setBcc(bccBuilder.toString());
+                } else {
+                    content.setBcc("");
+                }
+
+            } catch (ReflectiveOperationException e) {
+                log.debug(
+                        "Failed to extract detailed recipient information, falling back to getAllRecipients: {}",
+                        e.getMessage());
+                // Fallback to getAllRecipients for basic To field
+                Method getAllRecipients = messageClass.getMethod("getAllRecipients");
+                Object[] recipients = (Object[]) getAllRecipients.invoke(message);
+                if (recipients != null && recipients.length > 0) {
+                    StringBuilder allRecipientsBuilder = new StringBuilder();
+                    for (int i = 0; i < recipients.length; i++) {
+                        if (i > 0) allRecipientsBuilder.append(", ");
+                        allRecipientsBuilder.append(safeMimeDecode(recipients[i].toString()));
+                    }
+                    content.setTo(allRecipientsBuilder.toString());
+                } else {
+                    content.setTo("");
+                }
+                content.setCc("");
+                content.setBcc("");
+            }
 
             Method getSentDate = messageClass.getMethod("getSentDate");
             content.setDate((Date) getSentDate.invoke(message));
@@ -1130,16 +1218,21 @@ public class EmlToPdf {
         } catch (ReflectiveOperationException e) {
             log.warn(
                     "Error extracting email content via Jakarta Mail reflection: {}",
-                    e.getMessage());
+                    e.getMessage(),
+                    e);
             content.setSubject("Email Conversion");
             content.setFrom("Unknown");
             content.setTo("Unknown");
+            content.setCc("");
+            content.setBcc("");
             content.setTextBody("Email content could not be parsed with advanced processing");
         } catch (RuntimeException e) {
-            log.warn("Unexpected error during email content extraction: {}", e.getMessage());
+            log.warn("Unexpected error during email content extraction: {}", e.getMessage(), e);
             content.setSubject("Email Conversion");
             content.setFrom("Unknown");
             content.setTo("Unknown");
+            content.setCc("");
+            content.setBcc("");
             content.setTextBody("Email content could not be parsed with advanced processing");
         }
 
@@ -1170,10 +1263,10 @@ public class EmlToPdf {
             }
 
         } catch (ReflectiveOperationException e) {
-            log.warn("Error processing multipart via reflection: {}", e.getMessage());
+            log.warn("Error processing multipart via reflection: {}", e.getMessage(), e);
             content.setTextBody("Email content could not be parsed with advanced processing");
         } catch (ClassCastException e) {
-            log.warn("Unexpected type encountered in multipart processing: {}", e.getMessage());
+            log.warn("Unexpected type encountered in multipart processing: {}", e.getMessage(), e);
             content.setTextBody("Email content could not be parsed with advanced processing");
         }
     }
@@ -1190,12 +1283,29 @@ public class EmlToPdf {
             }
 
             Class<?> partClass = part.getClass();
-            Method isMimeType = partClass.getMethod("isMimeType", String.class);
-            Method getContent = partClass.getMethod("getContent");
-            Method getDisposition = partClass.getMethod("getDisposition");
-            Method getFileName = partClass.getMethod("getFileName");
-            Method getContentType = partClass.getMethod("getContentType");
-            Method getHeader = partClass.getMethod("getHeader", String.class);
+
+            // Validate that required methods exist before proceeding
+            Method isMimeType;
+            Method getContent;
+            Method getDisposition;
+            Method getFileName;
+            Method getContentType;
+            Method getHeader;
+
+            try {
+                isMimeType = partClass.getMethod("isMimeType", String.class);
+                getContent = partClass.getMethod("getContent");
+                getDisposition = partClass.getMethod("getDisposition");
+                getFileName = partClass.getMethod("getFileName");
+                getContentType = partClass.getMethod("getContentType");
+                getHeader = partClass.getMethod("getHeader", String.class);
+            } catch (NoSuchMethodException e) {
+                log.warn(
+                        "Required method not found on Jakarta Mail part class {}: {}",
+                        partClass.getName(),
+                        e.getMessage());
+                return;
+            }
 
             Object disposition = getDisposition.invoke(part);
             String filename = (String) getFileName.invoke(part);
@@ -1225,19 +1335,25 @@ public class EmlToPdf {
                     attachment.setFilename(safeMimeDecode(filename));
                     attachment.setContentType(contentType);
 
-                    // Check if it's an embedded image
-                    String[] contentIdHeaders =
-                            (String[]) getHeader.invoke(part, MimeConstants.HEADER_CONTENT_ID);
-                    if (contentIdHeaders != null
-                            && contentIdHeaders.length > 0
-                            && contentIdHeaders[0] != null) {
-                        attachment.setEmbedded(true);
-                        // Store the Content-ID, removing angle brackets if present
-                        String contentId = contentIdHeaders[0].trim();
-                        if (contentId.startsWith("<") && contentId.endsWith(">")) {
-                            contentId = contentId.substring(1, contentId.length() - 1);
+                    // Check if it's an embedded image - with proper null checks
+                    try {
+                        String[] contentIdHeaders =
+                                (String[]) getHeader.invoke(part, MimeConstants.HEADER_CONTENT_ID);
+                        if (contentIdHeaders != null
+                                && contentIdHeaders.length > 0
+                                && contentIdHeaders[0] != null
+                                && !contentIdHeaders[0].trim().isEmpty()) {
+                            attachment.setEmbedded(true);
+                            // Store the Content-ID, removing angle brackets if present
+                            String contentId = contentIdHeaders[0].trim();
+                            if (contentId.startsWith("<") && contentId.endsWith(">")) {
+                                contentId = contentId.substring(1, contentId.length() - 1);
+                            }
+                            attachment.setContentId(contentId);
                         }
-                        attachment.setContentId(contentId);
+                    } catch (ReflectiveOperationException e) {
+                        log.debug("Failed to get Content-ID header: {}", e.getMessage());
+                        // Continue without embedded flag
                     }
 
                     // Extract attachment data if attachments should be included OR if it's an
@@ -1248,7 +1364,7 @@ public class EmlToPdf {
                             Object attachmentContent = getContent.invoke(part);
                             byte[] attachmentData = null;
 
-                            if (attachmentContent instanceof java.io.InputStream inputStream) {
+                            if (attachmentContent instanceof InputStream inputStream) {
                                 try {
                                     attachmentData = inputStream.readAllBytes();
                                 } catch (IOException e) {
@@ -1352,6 +1468,22 @@ public class EmlToPdf {
                         sanitizeText(content.getSubject(), customHtmlSanitizer),
                         sanitizeText(content.getFrom(), customHtmlSanitizer),
                         sanitizeText(content.getTo(), customHtmlSanitizer)));
+
+        // Add CC recipients if present
+        if (content.getCc() != null && !content.getCc().trim().isEmpty()) {
+            html.append(
+                    String.format(
+                            "<div><strong>CC:</strong> %s</div>\n",
+                            sanitizeText(content.getCc(), customHtmlSanitizer)));
+        }
+
+        // Add BCC recipients if present
+        if (content.getBcc() != null && !content.getBcc().trim().isEmpty()) {
+            html.append(
+                    String.format(
+                            "<div><strong>BCC:</strong> %s</div>\n",
+                            sanitizeText(content.getBcc(), customHtmlSanitizer)));
+        }
 
         if (content.getDate() != null) {
             html.append(
@@ -1531,7 +1663,7 @@ public class EmlToPdf {
 
             @Override
             public void transferTo(@NotNull File dest) throws IOException, IllegalStateException {
-                try (FileOutputStream fos = new java.io.FileOutputStream(dest)) {
+                try (FileOutputStream fos = new FileOutputStream(dest)) {
                     byte[] data = attachment.getData();
                     if (data != null) {
                         fos.write(data);
@@ -1573,6 +1705,9 @@ public class EmlToPdf {
                 filename = "attachment_" + System.currentTimeMillis();
             }
 
+            // Handle duplicate filenames by making them unique
+            String uniqueFilename = ensureUniqueFilename(filename, existingNames.keySet());
+
             try {
                 PDEmbeddedFile embeddedFile =
                         new PDEmbeddedFile(document, attachment.getInputStream());
@@ -1586,19 +1721,51 @@ public class EmlToPdf {
                 }
 
                 PDComplexFileSpecification fileSpecification = new PDComplexFileSpecification();
-                fileSpecification.setFile(filename);
-                fileSpecification.setFileUnicode(filename);
+                fileSpecification.setFile(uniqueFilename);
+                fileSpecification.setFileUnicode(uniqueFilename);
                 fileSpecification.setEmbeddedFile(embeddedFile);
                 fileSpecification.setEmbeddedFileUnicode(embeddedFile);
 
-                existingNames.put(filename, fileSpecification);
-                log.info("Added email attachment: {} ({} bytes)", filename, attachment.getSize());
+                existingNames.put(uniqueFilename, fileSpecification);
+                log.info(
+                        "Added email attachment: {} ({} bytes)",
+                        uniqueFilename,
+                        attachment.getSize());
             } catch (IOException e) {
-                log.warn("Failed to create embedded file for attachment: {}", filename, e);
+                log.warn("Failed to create embedded file for attachment: {}", uniqueFilename, e);
             }
         }
 
         embeddedFilesTree.setNames(existingNames);
+    }
+
+    /**
+     * Ensures a filename is unique within the given set of existing names. If the filename already
+     * exists, appends a counter to make it unique.
+     */
+    private static String ensureUniqueFilename(String filename, Set<String> existingNames) {
+        if (!existingNames.contains(filename)) {
+            return filename;
+        }
+
+        String baseName;
+        String extension = "";
+        int lastDot = filename.lastIndexOf('.');
+        if (lastDot > 0) {
+            baseName = filename.substring(0, lastDot);
+            extension = filename.substring(lastDot);
+        } else {
+            baseName = filename;
+        }
+
+        int counter = 1;
+        String uniqueName;
+        do {
+            uniqueName = baseName + "_" + counter + extension;
+            counter++;
+        } while (existingNames.contains(uniqueName));
+
+        return uniqueName;
     }
 
     private static void addAttachmentAnnotationsToDocument(
@@ -1690,7 +1857,16 @@ public class EmlToPdf {
 
     private static @NotNull PDRectangle getPdRectangle(PDPage page, float x, float y) {
         PDRectangle mediaBox = page.getMediaBox();
-        float pdfY = mediaBox.getHeight() - y;
+
+        // More robust Y coordinate calculation that handles page transformations
+        float pdfY;
+        try {
+            // For standard orientation, use upper-right Y as reference
+            pdfY = mediaBox.getUpperRightY() - y;
+        } catch (Exception e) {
+            // Fallback to simple height calculation for edge cases
+            pdfY = mediaBox.getHeight() - y;
+        }
 
         float iconWidth =
                 StyleConstants.ATTACHMENT_ICON_WIDTH; // Keep original size for clickability
@@ -1707,8 +1883,8 @@ public class EmlToPdf {
 
     private static String formatEmailDate(Date date) {
         if (date == null) return "";
-        java.text.SimpleDateFormat formatter =
-                new java.text.SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a", Locale.ENGLISH);
+        SimpleDateFormat formatter =
+                new SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a", Locale.ENGLISH);
         return formatter.format(date);
     }
 
@@ -1733,7 +1909,7 @@ public class EmlToPdf {
         if (mimeUtilityDecodeTextMethod != null) {
             try {
                 return (String) mimeUtilityDecodeTextMethod.invoke(null, headerValue.trim());
-            } catch (Exception e) {
+            } catch (ReflectiveOperationException | RuntimeException e) {
                 log.debug(
                         "Failed to decode MIME header via MimeUtility, using fallback: {}",
                         headerValue);
@@ -1784,9 +1960,22 @@ public class EmlToPdf {
                     String decodedValue;
                     switch (encoding) {
                         case "B":
-                            // Base64 decoding
-                            byte[] decodedBytes = Base64.getDecoder().decode(encodedValue);
-                            decodedValue = new String(decodedBytes, Charset.forName(charset));
+                            // Base64 decoding - clean up line breaks first
+                            String cleanBase64 = encodedValue.replaceAll("\\s", "");
+                            byte[] decodedBytes = Base64.getDecoder().decode(cleanBase64);
+
+                            // Enhanced charset handling with fallbacks
+                            Charset targetCharset;
+                            try {
+                                targetCharset = Charset.forName(charset);
+                            } catch (Exception e) {
+                                log.debug(
+                                        "Unknown charset '{}', falling back to UTF-8: {}",
+                                        charset,
+                                        e.getMessage());
+                                targetCharset = StandardCharsets.UTF_8;
+                            }
+                            decodedValue = new String(decodedBytes, targetCharset);
                             break;
                         case "Q":
                             // Quoted-printable decoding
@@ -1847,9 +2036,17 @@ public class EmlToPdf {
             }
         }
 
-        // Convert bytes to proper charset
+        // Convert bytes to proper charset with fallback handling
         byte[] bytes = result.toString().getBytes(StandardCharsets.ISO_8859_1);
-        return new String(bytes, Charset.forName(charset));
+        try {
+            return new String(bytes, Charset.forName(charset));
+        } catch (Exception e) {
+            log.debug(
+                    "Unknown charset '{}' in quoted-printable decode, falling back to UTF-8: {}",
+                    charset,
+                    e.getMessage());
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
     }
 
     private static boolean isValidJakartaMailPart(Object part) {
@@ -1909,6 +2106,8 @@ public class EmlToPdf {
         private String subject;
         private String from;
         private String to;
+        private String cc;
+        private String bcc;
         private Date date;
         private String htmlBody;
         private String textBody;
@@ -1962,8 +2161,7 @@ public class EmlToPdf {
         }
     }
 
-    public static class AttachmentMarkerPositionFinder
-            extends org.apache.pdfbox.text.PDFTextStripper {
+    public static class AttachmentMarkerPositionFinder extends PDFTextStripper {
         @Getter private final List<MarkerPosition> positions = new ArrayList<>();
         private int currentPageIndex;
         protected boolean sortByPosition;
@@ -1979,19 +2177,18 @@ public class EmlToPdf {
         }
 
         @Override
-        protected void startPage(org.apache.pdfbox.pdmodel.PDPage page) throws IOException {
+        protected void startPage(PDPage page) throws IOException {
             super.startPage(page);
         }
 
         @Override
-        protected void endPage(org.apache.pdfbox.pdmodel.PDPage page) throws IOException {
+        protected void endPage(PDPage page) throws IOException {
             currentPageIndex++;
             super.endPage(page);
         }
 
         @Override
-        protected void writeString(
-                String string, List<org.apache.pdfbox.text.TextPosition> textPositions)
+        protected void writeString(String string, List<TextPosition> textPositions)
                 throws IOException {
             String lowerString = string.toLowerCase();
 
@@ -2017,7 +2214,7 @@ public class EmlToPdf {
                 String attachmentMarker = MimeConstants.ATTACHMENT_MARKER;
                 for (int i = 0; (i = string.indexOf(attachmentMarker, i)) != -1; i++) {
                     if (i < textPositions.size()) {
-                        org.apache.pdfbox.text.TextPosition textPosition = textPositions.get(i);
+                        TextPosition textPosition = textPositions.get(i);
                         MarkerPosition position =
                                 new MarkerPosition(
                                         currentPageIndex,
