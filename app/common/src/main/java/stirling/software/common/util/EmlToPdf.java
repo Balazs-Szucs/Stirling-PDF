@@ -42,43 +42,36 @@ import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
-import org.springframework.lang.NonNull;
 import org.springframework.web.multipart.MultipartFile;
 
 import lombok.Data;
 import lombok.Getter;
 import lombok.experimental.UtilityClass;
-import lombok.extern.slf4j.Slf4j;
 
 import stirling.software.common.model.api.converters.EmlToPdfRequest;
 import stirling.software.common.model.api.converters.HTMLToPdfRequest;
 import stirling.software.common.service.CustomPDFDocumentFactory;
 
-@Slf4j
 @UtilityClass
 public class EmlToPdf {
 
     private static final class StyleConstants {
-        // Font and layout constants
         static final int DEFAULT_FONT_SIZE = 12;
         static final String DEFAULT_FONT_FAMILY = "Helvetica, sans-serif";
         static final float DEFAULT_LINE_HEIGHT = 1.4f;
         static final String DEFAULT_ZOOM = "1.0";
 
-        // Color constants - aligned with application theme
         static final String DEFAULT_TEXT_COLOR = "#202124";
         static final String DEFAULT_BACKGROUND_COLOR = "#ffffff";
         static final String DEFAULT_BORDER_COLOR = "#e8eaed";
         static final String ATTACHMENT_BACKGROUND_COLOR = "#f9f9f9";
         static final String ATTACHMENT_BORDER_COLOR = "#eeeeee";
 
-        // Size constants for PDF annotations
         static final float ATTACHMENT_ICON_WIDTH = 12f;
         static final float ATTACHMENT_ICON_HEIGHT = 14f;
         static final float ANNOTATION_X_OFFSET = 2f;
         static final float ANNOTATION_Y_OFFSET = 10f;
 
-        // Content validation constants
         static final int EML_CHECK_LENGTH = 8192;
         static final int MIN_HEADER_COUNT_FOR_VALID_EML = 2;
 
@@ -90,15 +83,12 @@ public class EmlToPdf {
                 Pattern.compile("=\\?([^?]+)\\?([BbQq])\\?([^?]*)\\?=");
         static final String ATTACHMENT_MARKER = "@";
 
-        // Jakarta Mail disposition constants (when available via reflection)
         static final String DISPOSITION_ATTACHMENT = "attachment";
 
-        // Common MIME types
         static final String TEXT_PLAIN = "text/plain";
         static final String TEXT_HTML = "text/html";
         static final String MULTIPART_PREFIX = "multipart/";
 
-        // Common headers
         static final String HEADER_CONTENT_TYPE = "content-type:";
         static final String HEADER_CONTENT_DISPOSITION = "content-disposition:";
         static final String HEADER_CONTENT_TRANSFER_ENCODING = "content-transfer-encoding:";
@@ -114,10 +104,8 @@ public class EmlToPdf {
     }
 
     private static final class MimeTypeDetector {
-        // Enhanced MIME type mapping with PDF-embeddable types per PDF Spec Annex E
         private static final Map<String, String> EXTENSION_TO_MIME_TYPE =
                 Map.of(
-                        // Image formats (widely supported in PDF viewers)
                         ".png", "image/png",
                         ".jpg", "image/jpeg",
                         ".jpeg", "image/jpeg",
@@ -129,63 +117,21 @@ public class EmlToPdf {
                         ".tiff", "image/tiff",
                         ".tif", "image/tiff");
 
-        // Additional common embeddable types for email attachments
-        private static final Map<String, String> ADDITIONAL_TYPES =
-                Map.of(
-                        ".pdf", "application/pdf",
-                        ".txt", "text/plain",
-                        ".html", "text/html",
-                        ".xml", "text/xml",
-                        ".json", "application/json",
-                        ".csv", "text/csv",
-                        ".rtf", "application/rtf",
-                        ".zip", "application/zip",
-                        ".doc", "application/msword",
-                        ".docx",
-                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-
         static String detectMimeType(String filename, String existingMimeType) {
-            if (existingMimeType != null && !existingMimeType.trim().isEmpty()) {
-                String trimmed = existingMimeType.trim().toLowerCase();
-                if (isPdfEmbeddableType(trimmed)) {
-                    return existingMimeType;
-                }
+            if (existingMimeType != null && !existingMimeType.isEmpty()) {
+                return existingMimeType;
             }
 
             if (filename != null) {
                 String lowerFilename = filename.toLowerCase();
-
                 for (Map.Entry<String, String> entry : EXTENSION_TO_MIME_TYPE.entrySet()) {
                     if (lowerFilename.endsWith(entry.getKey())) {
                         return entry.getValue();
                     }
                 }
-
-                for (Map.Entry<String, String> entry : ADDITIONAL_TYPES.entrySet()) {
-                    if (lowerFilename.endsWith(entry.getKey())) {
-                        return entry.getValue();
-                    }
-                }
             }
 
-            // Fallback for unknown types - use generic binary type
-            return "application/octet-stream";
-        }
-
-        static boolean isPdfEmbeddableType(String mimeType) {
-            if (mimeType == null) return false;
-
-            String lower = mimeType.toLowerCase();
-            return lower.startsWith("image/")
-                    || lower.startsWith("text/")
-                    || "application/pdf".equals(lower)
-                    || "application/json".equals(lower)
-                    || "application/xml".equals(lower)
-                    || "application/zip".equals(lower)
-                    || "application/octet-stream".equals(lower)
-                    || lower.contains("document")
-                    || // Office document types
-                    lower.contains("officedocument"); // Modern Office formats
+            return "image/png";
         }
 
         private MimeTypeDetector() {}
@@ -200,8 +146,14 @@ public class EmlToPdf {
             try {
                 Class.forName("jakarta.mail.internet.MimeMessage");
                 Class.forName("jakarta.mail.Session");
+                Class.forName("jakarta.mail.internet.MimeUtility");
+                Class.forName("jakarta.mail.internet.MimePart");
+                Class.forName("jakarta.mail.internet.MimeMultipart");
+                Class.forName("jakarta.mail.Multipart");
+                Class.forName("jakarta.mail.Part");
+
                 jakartaMailAvailable = true;
-            } catch (ClassNotFoundException | RuntimeException e) {
+            } catch (ClassNotFoundException e) {
                 jakartaMailAvailable = false;
             }
         }
@@ -232,7 +184,6 @@ public class EmlToPdf {
         validateEmlInput(emlBytes);
 
         try {
-            // Generate HTML representation
             EmailContent emailContent;
             String htmlContent;
 
@@ -240,12 +191,10 @@ public class EmlToPdf {
                 emailContent = extractEmailContentAdvanced(emlBytes, request, customHtmlSanitizer);
                 htmlContent = generateEnhancedEmailHtml(emailContent, request, customHtmlSanitizer);
             } else {
-                // For basic processing, create minimal EmailContent for consistency
                 emailContent = new EmailContent();
                 htmlContent = convertEmlToHtmlBasic(emlBytes, request, customHtmlSanitizer);
             }
 
-            // Convert HTML to PDF
             byte[] pdfBytes =
                     convertHtmlToPdf(
                             weasyprintPath,
@@ -254,9 +203,7 @@ public class EmlToPdf {
                             tempFileManager,
                             customHtmlSanitizer);
 
-            // Attach files if available and requested
             if (shouldAttachFiles(emailContent, request)) {
-                // emailContent is guaranteed to be non-null here due to shouldAttachFiles check
                 pdfBytes =
                         attachFilesToPdf(
                                 pdfBytes, emailContent.getAttachments(), pdfDocumentFactory);
@@ -264,8 +211,10 @@ public class EmlToPdf {
 
             return pdfBytes;
 
-        } catch (RuntimeException e) {
-            throw new IOException("Conversion failed: " + e.getMessage(), e);
+        } catch (IOException | InterruptedException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Error converting EML to PDF", e);
         }
     }
 
@@ -275,8 +224,7 @@ public class EmlToPdf {
         }
 
         if (isInvalidEmlFormat(emlBytes)) {
-            throw new IllegalArgumentException(
-                    "Invalid EML file format - missing required headers or MIME structure");
+            throw new IllegalArgumentException("Invalid EML file format");
         }
     }
 
@@ -324,7 +272,6 @@ public class EmlToPdf {
     }
 
     private static String generateUniqueAttachmentId(String filename) {
-        // Simple unique ID generation combining filename hash and timestamp
         return "attachment_"
                 + (filename != null ? filename.hashCode() : "unknown")
                 + "_"
@@ -337,7 +284,7 @@ public class EmlToPdf {
             throw new IllegalArgumentException("EML file is empty or null");
         }
 
-        String emlContent = extractContentWithCorrectCharset(emlBytes, emlBytes.length);
+        String emlContent = new String(emlBytes, StandardCharsets.UTF_8);
 
         String subject = extractBasicHeader(emlContent, MimeConstants.HEADER_SUBJECT);
         String from = extractBasicHeader(emlContent, MimeConstants.HEADER_FROM);
@@ -357,7 +304,6 @@ public class EmlToPdf {
 
         StringBuilder html = new StringBuilder();
 
-        // HTML header
         html.append(
                 String.format(
                         """
@@ -378,7 +324,6 @@ public class EmlToPdf {
             <div class="email-header">
             """);
 
-        // Email header content
         html.append(
                 String.format(
                         """
@@ -391,7 +336,6 @@ public class EmlToPdf {
                         sanitizeText(from, customHtmlSanitizer),
                         sanitizeText(to, customHtmlSanitizer)));
 
-        // Include CC and BCC if present
         if (!cc.trim().isEmpty()) {
             html.append(
                     String.format(
@@ -469,7 +413,6 @@ public class EmlToPdf {
     private static EmailContent extractEmailContentAdvanced(
             byte[] emlBytes, EmlToPdfRequest request) {
         try {
-            // Use Jakarta Mail for processing
             Class<?> sessionClass = Class.forName("jakarta.mail.Session");
             Class<?> mimeMessageClass = Class.forName("jakarta.mail.internet.MimeMessage");
 
@@ -477,7 +420,6 @@ public class EmlToPdf {
                     sessionClass.getMethod("getDefaultInstance", Properties.class);
             Object session = getDefaultInstance.invoke(null, new Properties());
 
-            // Cast the session object to the proper type for the constructor
             Class<?>[] constructorArgs = new Class<?>[] {sessionClass, InputStream.class};
             Constructor<?> mimeMessageConstructor =
                     mimeMessageClass.getConstructor(constructorArgs);
@@ -487,9 +429,33 @@ public class EmlToPdf {
             return extractEmailContentAdvanced(message, request, null);
 
         } catch (ReflectiveOperationException e) {
-            // Create basic EmailContent from basic processing
             EmailContent content = new EmailContent();
             content.setHtmlBody(convertEmlToHtmlBasic(emlBytes, request, null));
+            return content;
+        }
+    }
+
+    private static EmailContent extractEmailContentAdvanced(
+            byte[] emlBytes, EmlToPdfRequest request, CustomHtmlSanitizer customHtmlSanitizer) {
+        try {
+            Class<?> sessionClass = Class.forName("jakarta.mail.Session");
+            Class<?> mimeMessageClass = Class.forName("jakarta.mail.internet.MimeMessage");
+
+            Method getDefaultInstance =
+                    sessionClass.getMethod("getDefaultInstance", Properties.class);
+            Object session = getDefaultInstance.invoke(null, new Properties());
+
+            Class<?>[] constructorArgs = new Class<?>[] {sessionClass, InputStream.class};
+            Constructor<?> mimeMessageConstructor =
+                    mimeMessageClass.getConstructor(constructorArgs);
+            Object message =
+                    mimeMessageConstructor.newInstance(session, new ByteArrayInputStream(emlBytes));
+
+            return extractEmailContentAdvanced(message, request, customHtmlSanitizer);
+
+        } catch (ReflectiveOperationException e) {
+            EmailContent content = new EmailContent();
+            content.setHtmlBody(convertEmlToHtmlBasic(emlBytes, request, customHtmlSanitizer));
             return content;
         }
     }
@@ -511,23 +477,12 @@ public class EmlToPdf {
             boolean inMultipart = false;
             String boundary = "";
 
-            // First pass: find boundary for multipart messages
             for (String line : lines) {
                 String lowerLine = line.toLowerCase().trim();
                 if (lowerLine.startsWith(MimeConstants.HEADER_CONTENT_TYPE)
                         && lowerLine.contains(MimeConstants.MULTIPART_PREFIX)) {
-                    if (lowerLine.contains("boundary=")) {
-                        int boundaryStart = lowerLine.indexOf("boundary=") + 9;
-                        String boundaryPart = line.substring(boundaryStart).trim();
-                        if (boundaryPart.startsWith("\"")) {
-                            boundary = boundaryPart.substring(1, boundaryPart.indexOf("\"", 1));
-                        } else {
-                            int spaceIndex = boundaryPart.indexOf(" ");
-                            boundary =
-                                    spaceIndex > 0
-                                            ? boundaryPart.substring(0, spaceIndex)
-                                            : boundaryPart;
-                        }
+                    boundary = extractBoundary(line);
+                    if (boundary != null) {
                         inMultipart = true;
                         break;
                     }
@@ -535,13 +490,10 @@ public class EmlToPdf {
                 if (line.trim().isEmpty()) break;
             }
 
-            // Second pass: extract attachment information
             for (String line : lines) {
                 String lowerLine = line.toLowerCase().trim();
 
-                // Check for boundary markers in multipart messages
                 if (inMultipart && line.trim().startsWith("--" + boundary)) {
-                    // Reset for new part
                     currentContentType = "";
                     currentDisposition = "";
                     currentFilename = "";
@@ -553,7 +505,6 @@ public class EmlToPdf {
                 if (inHeaders && line.trim().isEmpty()) {
                     inHeaders = false;
 
-                    // Process accumulated attachment info
                     if (isAttachment(currentDisposition, currentFilename, currentContentType)) {
                         addAttachmentToInfo(
                                 attachmentInfo,
@@ -561,7 +512,6 @@ public class EmlToPdf {
                                 currentContentType,
                                 currentEncoding);
 
-                        // Reset for next attachment
                         currentContentType = "";
                         currentDisposition = "";
                         currentFilename = "";
@@ -570,9 +520,8 @@ public class EmlToPdf {
                     continue;
                 }
 
-                if (!inHeaders) continue; // Skip body content
+                if (!inHeaders) continue;
 
-                // Parse headers
                 if (lowerLine.startsWith(MimeConstants.HEADER_CONTENT_TYPE)) {
                     currentContentType =
                             line.substring(MimeConstants.HEADER_CONTENT_TYPE.length()).trim();
@@ -580,14 +529,12 @@ public class EmlToPdf {
                     currentDisposition =
                             line.substring(MimeConstants.HEADER_CONTENT_DISPOSITION.length())
                                     .trim();
-                    // Extract filename if present
                     currentFilename = extractFilenameFromDisposition(currentDisposition);
                 } else if (lowerLine.startsWith(MimeConstants.HEADER_CONTENT_TRANSFER_ENCODING)) {
                     currentEncoding =
                             line.substring(MimeConstants.HEADER_CONTENT_TRANSFER_ENCODING.length())
                                     .trim();
                 } else if (line.startsWith(" ") || line.startsWith("\t")) {
-                    // Continuation of previous header
                     if (currentDisposition.contains("filename=")) {
                         currentDisposition += " " + line.trim();
                         currentFilename = extractFilenameFromDisposition(currentDisposition);
@@ -603,7 +550,11 @@ public class EmlToPdf {
             }
 
         } catch (RuntimeException e) {
-            return "";
+            attachmentInfo
+                    .append("<div class=\"attachment-error\">")
+                    .append("Error parsing attachments: ")
+                    .append(escapeHtml(e.getMessage()))
+                    .append("</div>\n");
         }
         return attachmentInfo.toString();
     }
@@ -613,6 +564,23 @@ public class EmlToPdf {
                         && !filename.isEmpty())
                 || (!filename.isEmpty() && !contentType.toLowerCase().startsWith("text/"))
                 || (contentType.toLowerCase().contains("application/") && !filename.isEmpty());
+    }
+
+    private static String extractBoundary(String contentType) {
+        if (contentType == null) return null;
+
+        Pattern boundaryPattern =
+                Pattern.compile("boundary\\s*=\\s*([^;\\s]+|\"[^\"]*\")", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = boundaryPattern.matcher(contentType);
+
+        if (matcher.find()) {
+            String boundary = matcher.group(1);
+            if (boundary.startsWith("\"") && boundary.endsWith("\"") && boundary.length() > 1) {
+                boundary = boundary.substring(1, boundary.length() - 1);
+            }
+            return boundary;
+        }
+        return null;
     }
 
     private static String extractFilenameFromDisposition(String disposition) {
@@ -638,7 +606,6 @@ public class EmlToPdf {
                 .append(escapeHtml(filename))
                 .append("</span>");
 
-        // Add content type and encoding info
         if (!contentType.isEmpty() || !encoding.isEmpty()) {
             attachmentInfo.append(" <span class=\"attachment-details\">(");
             if (!contentType.isEmpty()) {
@@ -656,8 +623,16 @@ public class EmlToPdf {
     private static boolean isInvalidEmlFormat(byte[] emlBytes) {
         try {
             int checkLength = Math.min(emlBytes.length, StyleConstants.EML_CHECK_LENGTH);
+            String content;
+            try {
+                content = new String(emlBytes, 0, checkLength, StandardCharsets.UTF_8);
+                if (content.contains("\uFFFD")) {
+                    content = new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
+                }
+            } catch (Exception e) {
+                content = new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
+            }
 
-            String content = extractContentWithCorrectCharset(emlBytes, checkLength);
             String lowerContent = content.toLowerCase(Locale.ROOT);
 
             boolean hasFrom =
@@ -669,7 +644,6 @@ public class EmlToPdf {
                     lowerContent.contains("to:")
                             || lowerContent.contains("cc:")
                             || lowerContent.contains("bcc:");
-            boolean hasMimeVersion = lowerContent.contains("mime-version:");
             boolean hasMimeStructure =
                     lowerContent.contains("multipart/")
                             || lowerContent.contains("text/plain")
@@ -683,57 +657,11 @@ public class EmlToPdf {
             if (hasDate) headerCount++;
             if (hasTo) headerCount++;
 
-            // For MIME messages, require MIME-Version header
-            boolean isValidMimeMessage =
-                    hasMimeVersion
-                            && (hasMimeStructure
-                                    || headerCount
-                                            >= StyleConstants.MIN_HEADER_COUNT_FOR_VALID_EML);
-            boolean isValidSimpleMessage =
-                    !hasMimeVersion && headerCount >= StyleConstants.MIN_HEADER_COUNT_FOR_VALID_EML;
-
-            return !(isValidMimeMessage || isValidSimpleMessage);
+            return headerCount < StyleConstants.MIN_HEADER_COUNT_FOR_VALID_EML && !hasMimeStructure;
 
         } catch (RuntimeException e) {
             return false;
         }
-    }
-
-    private static String extractContentWithCorrectCharset(byte[] emlBytes, int checkLength) {
-        // First pass: try to find charset in Content-Type header using basic ASCII parsing
-        String asciiContent =
-                new String(emlBytes, 0, Math.min(checkLength, 1024), StandardCharsets.US_ASCII);
-        String charset = extractCharsetFromContentType(asciiContent);
-
-        if (charset != null) {
-            try {
-                return new String(emlBytes, 0, checkLength, Charset.forName(charset));
-            } catch (Exception ignored) {
-                // Fall back to UTF-8
-            }
-        }
-
-        try {
-            String content = new String(emlBytes, 0, checkLength, StandardCharsets.UTF_8);
-            if (content.contains("\uFFFD")) {
-                content = new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
-            }
-            return content;
-        } catch (Exception e) {
-            return new String(emlBytes, 0, checkLength, StandardCharsets.ISO_8859_1);
-        }
-    }
-
-    private static String extractCharsetFromContentType(String content) {
-        Pattern charsetPattern =
-                Pattern.compile(
-                        "content-type:.*?charset\\s*=\\s*[\"']?([^\\s;\"']+)",
-                        Pattern.CASE_INSENSITIVE);
-        Matcher matcher = charsetPattern.matcher(content);
-        if (matcher.find()) {
-            return matcher.group(1).trim();
-        }
-        return null;
     }
 
     private static String extractBasicHeader(String emlContent, String headerName) {
@@ -744,7 +672,6 @@ public class EmlToPdf {
                 if (line.toLowerCase().startsWith(headerName.toLowerCase())) {
                     StringBuilder value =
                             new StringBuilder(line.substring(headerName.length()).trim());
-                    // Handle multi-line headers
                     for (int j = i + 1; j < lines.length; j++) {
                         if (lines[j].startsWith(" ") || lines[j].startsWith("\t")) {
                             value.append(" ").append(lines[j].trim());
@@ -752,13 +679,12 @@ public class EmlToPdf {
                             break;
                         }
                     }
-                    // Apply MIME header decoding
                     return safeMimeDecode(value.toString());
                 }
                 if (line.trim().isEmpty()) break;
             }
         } catch (RuntimeException e) {
-            return "";
+            // Ignore errors in header extraction
         }
         return "";
     }
@@ -840,22 +766,15 @@ public class EmlToPdf {
         html = html.replace("\r\n", "\n").replace("\r", "\n");
         html = html.replace("\n", "<br>\n");
 
-        // Convert URLs to clickable links
         html =
                 html.replaceAll(
                         "(https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+)",
                         "<a href=\"$1\" style=\"color: #1a73e8; text-decoration: underline;\">$1</a>");
 
-        // Convert email addresses to mailto links
         html =
                 html.replaceAll(
                         "([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,63})",
                         "<a href=\"mailto:$1\" style=\"color: #1a73e8; text-decoration: underline;\">$1</a>");
-        // Convert phone numbers to tel links
-        html =
-                html.replaceAll(
-                        "(\\+?[0-9][0-9\\-\\. ]{7,}[0-9])",
-                        "<a href=\"tel:$1\" style=\"color: #1a73e8; text-decoration: underline;\">$1</a>");
 
         return html;
     }
@@ -869,15 +788,13 @@ public class EmlToPdf {
             String htmlBody, EmailContent emailContent, CustomHtmlSanitizer customHtmlSanitizer) {
         if (htmlBody == null) return "";
 
-        // Apply the custom HTML sanitizer to clean the content if available
         String processed;
         if (customHtmlSanitizer != null) {
             processed = customHtmlSanitizer.sanitize(htmlBody);
         } else {
-            processed = htmlBody; // No sanitization for public API backward compatibility
+            processed = htmlBody;
         }
 
-        // Remove problematic CSS that might interfere with PDF generation
         processed = processed.replaceAll("(?i)\\s*position\\s*:\\s*fixed[^;]*;?", "");
         processed = processed.replaceAll("(?i)\\s*position\\s*:\\s*absolute[^;]*;?", "");
 
@@ -891,7 +808,6 @@ public class EmlToPdf {
     private static String processInlineImages(String htmlContent, EmailContent emailContent) {
         if (htmlContent == null || emailContent == null) return htmlContent;
 
-        // Create a map of Content-ID to attachment data
         Map<String, EmailAttachment> contentIdMap = new HashMap<>();
         for (EmailAttachment attachment : emailContent.getAttachments()) {
             if (attachment.isEmbedded()
@@ -903,7 +819,6 @@ public class EmlToPdf {
 
         if (contentIdMap.isEmpty()) return htmlContent;
 
-        // Pattern to match cid: references in img src attributes
         Pattern cidPattern =
                 Pattern.compile(
                         "(?i)<img[^>]*\\ssrc\\s*=\\s*['\"]cid:([^'\"]+)['\"][^>]*>",
@@ -916,7 +831,6 @@ public class EmlToPdf {
             EmailAttachment attachment = contentIdMap.get(contentId);
 
             if (attachment != null && attachment.getData() != null) {
-                // Convert to data URI using improved MIME type detection
                 String mimeType =
                         MimeTypeDetector.detectMimeType(
                                 attachment.getFilename(), attachment.getContentType());
@@ -924,7 +838,6 @@ public class EmlToPdf {
                 String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
                 String dataUri = "data:" + mimeType + ";base64," + base64Data;
 
-                // Replace the cid: reference with the data URI
                 String replacement =
                         matcher.group(0).replaceFirst("cid:" + Pattern.quote(contentId), dataUri);
                 matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
@@ -939,42 +852,142 @@ public class EmlToPdf {
 
     private static void appendEnhancedStyles(StringBuilder html) {
         int fontSize = StyleConstants.DEFAULT_FONT_SIZE;
+        String textColor = StyleConstants.DEFAULT_TEXT_COLOR;
+        String backgroundColor = StyleConstants.DEFAULT_BACKGROUND_COLOR;
+        String borderColor = StyleConstants.DEFAULT_BORDER_COLOR;
+
         String css =
                 String.format(
                         """
-            body { font-family: %s; font-size: %dpx; line-height: %s; color: %s; margin: 0; padding: 16px; background-color: %s; }
-            .email-container { width: 100%%; max-width: 100%%; margin: 0 auto; }
-            .email-header { padding-bottom: 10px; border-bottom: 1px solid %s; margin-bottom: 10px; }
-            .email-header h1 { margin: 0 0 10px 0; font-size: %dpx; font-weight: bold; }
-            .email-meta div { margin-bottom: 2px; font-size: %dpx; }
-            .email-body { word-wrap: break-word; }
-            .attachment-section { margin-top: 15px; padding: 10px; background-color: %s; border: 1px solid %s; border-radius: 3px; }
-            .attachment-section h3 { margin: 0 0 8px 0; font-size: %dpx; }
-            .attachment-item { padding: 5px 0; }
-            .attachment-icon { margin-right: 5px; }
-            .attachment-details { font-size: %dpx; color: #555555; }
-            .attachment-info-note { margin-top: 8px; padding: 6px; font-size: %dpx; border-radius: 3px; background-color: #fff9e6; border: 1px solid #fff0c2; color: #664d00; }
-            img { max-width: 100%%; height: auto; display: block; }
+            body {
+              font-family: %s;
+              font-size: %dpx;
+              line-height: %s;
+              color: %s;
+              margin: 0;
+              padding: 16px;
+              background-color: %s;
+            }
+
+            .email-container {
+              width: 100%%;
+              max-width: 100%%;
+              margin: 0 auto;
+            }
+
+            .email-header {
+              padding-bottom: 10px;
+              border-bottom: 1px solid %s;
+              margin-bottom: 10px;
+            }
+
+            .email-header h1 {
+              margin: 0 0 10px 0;
+              font-size: %dpx;
+              font-weight: bold;
+            }
+
+            .email-meta div {
+              margin-bottom: 2px;
+              font-size: %dpx;
+            }
+
+            .email-body {
+              word-wrap: break-word;
+            }
+
+            .attachment-section {
+              margin-top: 15px;
+              padding: 10px;
+              background-color: %s;
+              border: 1px solid %s;
+              border-radius: 3px;
+            }
+
+            .attachment-section h3 {
+              margin: 0 0 8px 0;
+              font-size: %dpx;
+            }
+
+            .attachment-item {
+              padding: 5px 0;
+            }
+
+            .attachment-icon {
+              margin-right: 5px;
+            }
+
+            .attachment-details, .attachment-type {
+              font-size: %dpx;
+              color: #555555;
+            }
+
+            .attachment-inclusion-note, .attachment-info-note {
+              margin-top: 8px;
+              padding: 6px;
+              font-size: %dpx;
+              border-radius: 3px;
+            }
+
+            .attachment-inclusion-note {
+              background-color: #e6ffed;
+              border: 1px solid #d4f7dc;
+              color: #006420;
+            }
+
+            .attachment-info-note {
+              background-color: #fff9e6;
+              border: 1px solid #fff0c2;
+              color: #664d00;
+            }
+
+            .attachment-link-container {
+              display: flex;
+              align-items: center;
+              padding: 8px;
+              background-color: #f8f9fa;
+              border: 1px solid #dee2e6;
+              border-radius: 4px;
+              margin: 4px 0;
+            }
+
+            .attachment-link-container:hover {
+              background-color: #e9ecef;
+            }
+
+            .attachment-note {
+              font-size: %dpx;
+              color: #6c757d;
+              font-style: italic;
+              margin-left: 8px;
+            }
+
+            img {
+              max-width: 100%%;
+              height: auto;
+              display: block;
+            }
             """,
                         StyleConstants.DEFAULT_FONT_FAMILY,
                         fontSize,
                         StyleConstants.DEFAULT_LINE_HEIGHT,
-                        StyleConstants.DEFAULT_TEXT_COLOR,
-                        StyleConstants.DEFAULT_BACKGROUND_COLOR,
-                        StyleConstants.DEFAULT_BORDER_COLOR,
+                        textColor,
+                        backgroundColor,
+                        borderColor,
                         fontSize + 4,
                         fontSize - 1,
                         StyleConstants.ATTACHMENT_BACKGROUND_COLOR,
                         StyleConstants.ATTACHMENT_BORDER_COLOR,
                         fontSize + 1,
                         fontSize - 2,
-                        fontSize - 2);
+                        fontSize - 2,
+                        fontSize - 3);
+
         html.append(css);
     }
 
     private static String escapeHtml(String text) {
         if (text == null) return "";
-        // Simple HTML escaping for more complex sanitization, use CustomHtmlSanitizer
         return text.replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
@@ -997,7 +1010,6 @@ public class EmlToPdf {
             htmlRequest.setFileInput(request.getFileInput());
         }
 
-        // Set default zoom level
         htmlRequest.setZoom(Float.parseFloat(StyleConstants.DEFAULT_ZOOM));
 
         return htmlRequest;
@@ -1010,12 +1022,10 @@ public class EmlToPdf {
         try {
             Class<?> messageClass = message.getClass();
 
-            // Extract headers via reflection
             Method getSubject = messageClass.getMethod("getSubject");
             String subject = (String) getSubject.invoke(message);
             content.setSubject(subject != null ? safeMimeDecode(subject) : "No Subject");
 
-            // Extract From addresses
             Method getFrom = messageClass.getMethod("getFrom");
             Object[] fromAddresses = (Object[]) getFrom.invoke(message);
             if (fromAddresses != null && fromAddresses.length > 0) {
@@ -1029,7 +1039,6 @@ public class EmlToPdf {
                 content.setFrom("");
             }
 
-            // Extract To addresses
             try {
                 Method getRecipients =
                         messageClass.getMethod(
@@ -1037,12 +1046,10 @@ public class EmlToPdf {
                                 Class.forName("jakarta.mail.Message$RecipientType"));
                 Class<?> recipientTypeClass = Class.forName("jakarta.mail.Message$RecipientType");
 
-                // Get TO recipients
                 Object toType = recipientTypeClass.getField("TO").get(null);
                 Object[] toRecipients = (Object[]) getRecipients.invoke(message, toType);
-                recipientSafeMimeDecode(content, toRecipients);
+                recipientBuilder(content, toRecipients);
 
-                // Get CC recipients
                 Object ccType = recipientTypeClass.getField("CC").get(null);
                 Object[] ccRecipients = (Object[]) getRecipients.invoke(message, ccType);
                 if (ccRecipients != null && ccRecipients.length > 0) {
@@ -1056,7 +1063,6 @@ public class EmlToPdf {
                     content.setCc("");
                 }
 
-                // Get BCC recipients
                 Object bccType = recipientTypeClass.getField("BCC").get(null);
                 Object[] bccRecipients = (Object[]) getRecipients.invoke(message, bccType);
                 if (bccRecipients != null && bccRecipients.length > 0) {
@@ -1071,12 +1077,9 @@ public class EmlToPdf {
                 }
 
             } catch (ReflectiveOperationException e) {
-                log.debug(
-                        "Failed to extract detailed recipient information, falling back to getAllRecipients: {}",
-                        e.getMessage());
                 Method getAllRecipients = messageClass.getMethod("getAllRecipients");
                 Object[] recipients = (Object[]) getAllRecipients.invoke(message);
-                recipientSafeMimeDecode(content, recipients);
+                recipientBuilder(content, recipients);
                 content.setCc("");
                 content.setBcc("");
             }
@@ -1084,7 +1087,6 @@ public class EmlToPdf {
             Method getSentDate = messageClass.getMethod("getSentDate");
             content.setDate((Date) getSentDate.invoke(message));
 
-            // Extract content
             Method getContent = messageClass.getMethod("getContent");
             Object messageContent = getContent.invoke(message);
 
@@ -1098,17 +1100,17 @@ public class EmlToPdf {
                     content.setTextBody(stringContent);
                 }
             } else {
-                // Handle multipart content
                 try {
                     Class<?> multipartClass = Class.forName("jakarta.mail.Multipart");
                     if (multipartClass.isInstance(messageContent)) {
                         processMultipartAdvanced(
                                 messageContent, content, request, customHtmlSanitizer);
                     }
-                } catch (ReflectiveOperationException e) {
-                    log.warn(
-                            "Error processing multipart content via reflection: {}",
-                            e.getMessage());
+                } catch (ReflectiveOperationException | ClassCastException e) {
+                    content.setTextBody(
+                            "Email content could not be parsed with advanced processing");
+                    content.setHtmlBody(
+                            "Email content could not be parsed with advanced processing");
                 }
             }
 
@@ -1124,7 +1126,7 @@ public class EmlToPdf {
         return content;
     }
 
-    private static void recipientSafeMimeDecode(EmailContent content, Object[] toRecipients) {
+    private static void recipientBuilder(EmailContent content, Object[] toRecipients) {
         if (toRecipients != null && toRecipients.length > 0) {
             StringBuilder toBuilder = new StringBuilder();
             for (int i = 0; i < toRecipients.length; i++) {
@@ -1143,100 +1145,28 @@ public class EmlToPdf {
             EmlToPdfRequest request,
             CustomHtmlSanitizer customHtmlSanitizer) {
         try {
-            if (!isValidJakartaMailMultipart(multipart)) {
-                return;
-            }
-
             Class<?> multipartClass = multipart.getClass();
             Method getCount = multipartClass.getMethod("getCount");
             int count = (Integer) getCount.invoke(multipart);
 
             Method getBodyPart = multipartClass.getMethod("getBodyPart", int.class);
 
-            ExtractedContent extractedContent =
-                    extractPreferredBodyRecursive(multipart, customHtmlSanitizer);
-            if (extractedContent.htmlBody != null) {
-                content.setHtmlBody(extractedContent.htmlBody);
-            }
-            if (extractedContent.textBody != null && content.getHtmlBody() == null) {
-                content.setTextBody(extractedContent.textBody);
-            }
-
-            // Process parts for attachments and other content
             for (int i = 0; i < count; i++) {
                 Object part = getBodyPart.invoke(multipart, i);
                 processPartAdvanced(part, content, request, customHtmlSanitizer);
             }
 
         } catch (ReflectiveOperationException | ClassCastException e) {
-            if (content.getHtmlBody() == null && content.getTextBody() == null) {
-                content.setTextBody("Email content could not be parsed with advanced processing");
+            if (request != null && request.isIncludeAttachments()) {
+                content.setHtmlBody(
+                        "<div class=\"error\">Error processing multipart content: "
+                                + escapeHtml(e.getMessage())
+                                + "</div>");
+            } else {
+                content.setHtmlBody(
+                        "<div class=\"error\">Error processing multipart content</div>");
             }
         }
-    }
-
-    private static ExtractedContent extractPreferredBodyRecursive(
-            Object part, CustomHtmlSanitizer customHtmlSanitizer) {
-        ExtractedContent result = new ExtractedContent();
-
-        try {
-            Class<?> partClass = part.getClass();
-
-            Class<?> multipartClass = Class.forName("jakarta.mail.Multipart");
-            if (multipartClass.isInstance(part)) {
-                Method getCount = partClass.getMethod("getCount");
-                Method getBodyPart = partClass.getMethod("getBodyPart", int.class);
-                int count = (Integer) getCount.invoke(part);
-
-                for (int i = 0; i < count; i++) {
-                    Object bodyPart = getBodyPart.invoke(part, i);
-                    ExtractedContent childContent =
-                            extractPreferredBodyRecursive(bodyPart, customHtmlSanitizer);
-
-                    if (childContent.htmlBody != null) {
-                        result.htmlBody = childContent.htmlBody;
-                    }
-                    if (childContent.textBody != null && result.htmlBody == null) {
-                        result.textBody = childContent.textBody;
-                    }
-                }
-                return result;
-            }
-
-            // Check if this part has content
-            Method getContent = partClass.getMethod("getContent");
-            Method isMimeType = partClass.getMethod("isMimeType", String.class);
-            Method getDisposition = partClass.getMethod("getDisposition");
-            Object content = getContent.invoke(part);
-            Object disposition = getDisposition.invoke(part);
-
-            // Only process if not an attachment
-            if (disposition == null
-                    || !disposition.toString().toLowerCase().contains("attachment")) {
-                if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_HTML)) {
-                    String htmlContent = content.toString();
-                    if (customHtmlSanitizer != null) {
-                        htmlContent = customHtmlSanitizer.sanitize(htmlContent);
-                    }
-                    result.htmlBody = htmlContent;
-                } else if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_PLAIN)) {
-                    result.textBody = content.toString();
-                } else if (multipartClass.isInstance(content)) {
-                    // Nested multipart - recurse
-                    return extractPreferredBodyRecursive(content, customHtmlSanitizer);
-                }
-            }
-
-        } catch (ReflectiveOperationException e) {
-            // Error in recursive body extraction
-        }
-
-        return result;
-    }
-
-    private static class ExtractedContent {
-        String htmlBody;
-        String textBody;
     }
 
     private static void processPartAdvanced(
@@ -1245,9 +1175,6 @@ public class EmlToPdf {
             EmlToPdfRequest request,
             CustomHtmlSanitizer customHtmlSanitizer) {
         try {
-            if (!isValidJakartaMailPart(part)) {
-                return;
-            }
 
             Class<?> partClass = part.getClass();
 
@@ -1279,7 +1206,6 @@ public class EmlToPdf {
             } else if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_HTML)
                     && disposition == null) {
                 String htmlBody = (String) getContent.invoke(part);
-                // Apply sanitization to the HTML content if sanitizer is available
                 if (customHtmlSanitizer != null) {
                     htmlBody = customHtmlSanitizer.sanitize(htmlBody);
                 }
@@ -1289,7 +1215,6 @@ public class EmlToPdf {
 
                 content.setAttachmentCount(content.getAttachmentCount() + 1);
 
-                // Always extract basic attachment metadata for display
                 if (filename != null && !filename.trim().isEmpty()) {
                     EmailAttachment attachment = new EmailAttachment();
                     attachment.setFilename(safeMimeDecode(filename));
@@ -1303,16 +1228,14 @@ public class EmlToPdf {
                                 && contentIdHeaders[0] != null
                                 && !contentIdHeaders[0].trim().isEmpty()) {
                             attachment.setEmbedded(true);
-
-                            String contentId =
-                                    contentIdHeaders[0].trim(); // Store content ID for uniqueness
+                            String contentId = contentIdHeaders[0].trim();
                             if (contentId.startsWith("<") && contentId.endsWith(">")) {
                                 contentId = contentId.substring(1, contentId.length() - 1);
                             }
                             attachment.setContentId(contentId);
                         }
                     } catch (ReflectiveOperationException e) {
-                        // Continue without embedded flag
+                        // Ignore errors in content ID extraction
                     }
 
                     if ((request != null && request.isIncludeAttachments())
@@ -1324,8 +1247,14 @@ public class EmlToPdf {
                             if (attachmentContent instanceof InputStream inputStream) {
                                 try {
                                     attachmentData = inputStream.readAllBytes();
-                                } catch (IOException | OutOfMemoryError ignored) {
-                                    // Continue without attachment data
+                                } catch (IOException | OutOfMemoryError e) {
+                                    if (attachment.isEmbedded()) {
+                                        attachmentData = new byte[0]; // Avoid null data
+                                    } else {
+                                        throw e; // Rethrow for non-embedded attachments
+                                    }
+                                } finally {
+                                    inputStream.close();
                                 }
                             } else if (attachmentContent instanceof byte[] byteArray) {
                                 attachmentData = byteArray;
@@ -1334,7 +1263,6 @@ public class EmlToPdf {
                             }
 
                             if (attachmentData != null) {
-                                // Check size limit (use default 10MB if request is null)
                                 long maxSizeMB =
                                         request != null ? request.getMaxAttachmentSizeMB() : 10L;
                                 long maxSizeBytes = maxSizeMB * 1024 * 1024;
@@ -1351,15 +1279,15 @@ public class EmlToPdf {
                                     }
                                 }
                             }
-                        } catch (ReflectiveOperationException e) {
-                            // Failed to extract attachment data
+                        } catch (ReflectiveOperationException | IOException e) {
+                            // Ignore errors in content extraction
+
                         }
                     }
-
                     content.getAttachments().add(attachment);
                 }
             } else if ((Boolean) isMimeType.invoke(part, "multipart/*")) {
-                try { // Try: process multipart content
+                try {
                     Object multipartContent = getContent.invoke(part);
                     if (multipartContent != null) {
                         Class<?> multipartClass = Class.forName("jakarta.mail.Multipart");
@@ -1369,12 +1297,19 @@ public class EmlToPdf {
                         }
                     }
                 } catch (ReflectiveOperationException e) {
-                    // Error processing multipart content
+                    // Ignore errors in multipart processing
                 }
             }
 
         } catch (ReflectiveOperationException | RuntimeException e) {
-            // Error processing multipart part
+            if (request != null && request.isIncludeAttachments()) {
+                content.setHtmlBody(
+                        "<div class=\"error\">Error processing part: "
+                                + escapeHtml(e.getMessage())
+                                + "</div>");
+            } else {
+                content.setHtmlBody("<div class=\"error\">Error processing part</div>");
+            }
         }
     }
 
@@ -1414,14 +1349,14 @@ public class EmlToPdf {
                         sanitizeText(content.getFrom(), customHtmlSanitizer),
                         sanitizeText(content.getTo(), customHtmlSanitizer)));
 
-        if (content.getCc() != null && !content.getCc().trim().isEmpty()) { // Check for CC
+        if (content.getCc() != null && !content.getCc().trim().isEmpty()) {
             html.append(
                     String.format(
                             "<div><strong>CC:</strong> %s</div>\n",
                             sanitizeText(content.getCc(), customHtmlSanitizer)));
         }
 
-        if (content.getBcc() != null && !content.getBcc().trim().isEmpty()) { // Check for BCC
+        if (content.getBcc() != null && !content.getBcc().trim().isEmpty()) {
             html.append(
                     String.format(
                             "<div><strong>BCC:</strong> %s</div>\n",
@@ -1465,7 +1400,6 @@ public class EmlToPdf {
 
             if (!content.getAttachments().isEmpty()) {
                 for (EmailAttachment attachment : content.getAttachments()) {
-                    // Create attachment info with paperclip emoji before filename
                     String uniqueId = generateUniqueAttachmentId(attachment.getFilename());
                     attachment.setEmbeddedFilename(
                             attachment.getEmbeddedFilename() != null
@@ -1532,7 +1466,6 @@ public class EmlToPdf {
 
         try (PDDocument document = pdfDocumentFactory.load(pdfBytes);
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-
             List<MultipartFile> multipartAttachments = new ArrayList<>();
             for (EmailAttachment attachment : attachments) {
                 if (attachment.getData() != null && attachment.getData().length > 0) {
@@ -1556,8 +1489,7 @@ public class EmlToPdf {
     private static MultipartFile createMultipartFile(EmailAttachment attachment) {
         return new MultipartFile() {
             @Override
-            @NonNull
-            public String getName() {
+            public @NotNull String getName() {
                 return "attachment";
             }
 
@@ -1586,20 +1518,18 @@ public class EmlToPdf {
             }
 
             @Override
-            @NonNull
-            public byte[] getBytes() {
+            public byte @NotNull [] getBytes() {
                 return attachment.getData() != null ? attachment.getData() : new byte[0];
             }
 
             @Override
-            @NonNull
-            public InputStream getInputStream() {
+            public @NotNull InputStream getInputStream() {
                 byte[] data = attachment.getData();
                 return new ByteArrayInputStream(data != null ? data : new byte[0]);
             }
 
             @Override
-            public void transferTo(@NonNull File dest) throws IOException, IllegalStateException {
+            public void transferTo(@NotNull File dest) throws IOException, IllegalStateException {
                 try (FileOutputStream fos = new FileOutputStream(dest)) {
                     byte[] data = attachment.getData();
                     if (data != null) {
@@ -1611,7 +1541,7 @@ public class EmlToPdf {
     }
 
     private static void addAttachmentsToDocument(
-            PDDocument document, List<MultipartFile> attachments) throws IOException {
+            PDDocument document, List<MultipartFile> attachments) {
         PDDocumentCatalog catalog = document.getDocumentCatalog();
         PDDocumentNameDictionary documentNames = catalog.getNames();
         if (documentNames == null) {
@@ -1626,8 +1556,12 @@ public class EmlToPdf {
         }
 
         Map<String, PDComplexFileSpecification> existingNames;
-        Map<String, PDComplexFileSpecification> names = embeddedFilesTree.getNames();
-        existingNames = names != null ? new HashMap<>(names) : new HashMap<>();
+        try {
+            Map<String, PDComplexFileSpecification> names = embeddedFilesTree.getNames();
+            existingNames = names != null ? new HashMap<>(names) : new HashMap<>();
+        } catch (IOException e) {
+            existingNames = new HashMap<>();
+        }
 
         for (MultipartFile attachment : attachments) {
             String filename = attachment.getOriginalFilename();
@@ -1635,8 +1569,7 @@ public class EmlToPdf {
                 filename = "attachment_" + System.currentTimeMillis();
             }
 
-            String uniqueFilename =
-                    ensureUniqueFilename(filename, existingNames.keySet()); // Handle duplicates
+            String uniqueFilename = ensureUniqueFilename(filename, existingNames.keySet());
 
             try {
                 PDEmbeddedFile embeddedFile =
@@ -1656,16 +1589,8 @@ public class EmlToPdf {
                 fileSpecification.setEmbeddedFile(embeddedFile);
                 fileSpecification.setEmbeddedFileUnicode(embeddedFile);
 
-                // Set AFRelationship per PDF Spec (ISO 32000-2, Section 12.5.6.15)
-                try {
-                    fileSpecification.getCOSObject().setName("AFRelationship", "Data");
-                } catch (Exception e) {
-                    // Could not set AFRelationship
-                }
-
                 existingNames.put(uniqueFilename, fileSpecification);
             } catch (IOException e) {
-                // Failed to create embedded file
             }
         }
 
@@ -1703,13 +1628,11 @@ public class EmlToPdf {
             return;
         }
 
-        // 1. Find the screen position of all attachment markers
         AttachmentMarkerPositionFinder finder = new AttachmentMarkerPositionFinder();
         finder.setSortByPosition(true); // Process pages in order
         finder.getText(document);
         List<MarkerPosition> markerPositions = finder.getPositions();
 
-        // 3. Create an invisible annotation over each found marker
         int annotationsToAdd = Math.min(markerPositions.size(), attachments.size());
         for (int i = 0; i < annotationsToAdd; i++) {
             MarkerPosition position = markerPositions.get(i);
@@ -1743,7 +1666,7 @@ public class EmlToPdf {
             fileAnnotation.setAppearance(null);
         }
 
-        fileAnnotation.setInvisible(true); // Replaced by @
+        fileAnnotation.setInvisible(true);
         fileAnnotation.setHidden(false); // Must be false to remain clickable
         fileAnnotation.setNoView(false); // Must be false to remain clickable
         fileAnnotation.setPrinted(false);
@@ -1781,7 +1704,6 @@ public class EmlToPdf {
         float iconHeight =
                 StyleConstants.ATTACHMENT_ICON_HEIGHT; // Keep original size for clickability
 
-        // Keep the full-size rectangle so it remains clickable
         return new PDRectangle(
                 x + StyleConstants.ANNOTATION_X_OFFSET,
                 pdfY - iconHeight + StyleConstants.ANNOTATION_Y_OFFSET,
@@ -1816,11 +1738,10 @@ public class EmlToPdf {
             try {
                 return (String) mimeUtilityDecodeTextMethod.invoke(null, headerValue.trim());
             } catch (ReflectiveOperationException | RuntimeException e) {
-                // Fall back to custom decoding
             }
         }
 
-        return decodeMimeHeader(headerValue.trim()); // Fallback to custom decoding
+        return decodeMimeHeader(headerValue.trim());
     }
 
     private static synchronized void initializeMimeUtilityDecoding() {
@@ -1843,17 +1764,12 @@ public class EmlToPdf {
         }
 
         try {
-            String preprocessed = encodedText.replaceAll("\\?=\\s*=\\?", "?==?");
-
             StringBuilder result = new StringBuilder();
-            Matcher matcher = MimeConstants.MIME_ENCODED_PATTERN.matcher(preprocessed);
+            Matcher matcher = MimeConstants.MIME_ENCODED_PATTERN.matcher(encodedText);
             int lastEnd = 0;
 
             while (matcher.find()) {
-                String beforeText = preprocessed.substring(lastEnd, matcher.start());
-                if (lastEnd == 0 || !beforeText.trim().isEmpty()) {
-                    result.append(beforeText);
-                }
+                result.append(encodedText, lastEnd, matcher.start());
 
                 String charset = matcher.group(1);
                 String encoding = matcher.group(2).toUpperCase();
@@ -1865,7 +1781,14 @@ public class EmlToPdf {
                                 case "B" -> {
                                     String cleanBase64 = encodedValue.replaceAll("\\s", "");
                                     byte[] decodedBytes = Base64.getDecoder().decode(cleanBase64);
-                                    yield decodeWithCharset(decodedBytes, charset);
+
+                                    Charset targetCharset;
+                                    try {
+                                        targetCharset = Charset.forName(charset);
+                                    } catch (Exception e) {
+                                        targetCharset = StandardCharsets.UTF_8;
+                                    }
+                                    yield new String(decodedBytes, targetCharset);
                                 }
                                 case "Q" -> decodeQuotedPrintable(encodedValue, charset);
                                 default -> matcher.group(0);
@@ -1878,50 +1801,16 @@ public class EmlToPdf {
                 lastEnd = matcher.end();
             }
 
-            result.append(preprocessed.substring(lastEnd));
+            result.append(encodedText.substring(lastEnd));
 
             return result.toString();
         } catch (Exception e) {
-            return encodedText; // Return original if decoding fails
-        }
-    }
-
-    private static String decodeWithCharset(byte[] bytes, String charsetName) {
-        try {
-            return new String(bytes, Charset.forName(charsetName));
-        } catch (Exception e) {
-            String normalizedCharset = charsetName.toLowerCase().replace("-", "").replace("_", "");
-
-            String fallbackCharset =
-                    switch (normalizedCharset) {
-                        case "iso2022jp", "iso2022jp2" -> "ISO-2022-JP";
-                        case "shiftjis", "sjis", "mskanji" -> "Shift_JIS";
-                        case "eucjp" -> "EUC-JP";
-                        case "euckr" -> "EUC-KR";
-                        case "gb2312", "gb18030" -> "GB18030";
-                        case "big5" -> "Big5";
-                        case "utf8" -> "UTF-8";
-                        case "ascii", "usascii" -> "US-ASCII";
-                        case "iso88591", "latin1" -> "ISO-8859-1";
-                        case "iso885915", "latin9" -> "ISO-8859-15";
-                        default -> null;
-                    };
-
-            if (fallbackCharset != null) {
-                try {
-                    return new String(bytes, Charset.forName(fallbackCharset));
-                } catch (Exception fallbackException) {
-                    // Continue to UTF-8 fallback
-                }
-            }
-
-            return new String(bytes, StandardCharsets.UTF_8);
+            return encodedText;
         }
     }
 
     private static String decodeQuotedPrintable(String encodedText, String charset) {
-        ByteArrayOutputStream byteResult = new ByteArrayOutputStream();
-
+        StringBuilder result = new StringBuilder();
         for (int i = 0; i < encodedText.length(); i++) {
             char c = encodedText.charAt(i);
             switch (c) {
@@ -1930,48 +1819,25 @@ public class EmlToPdf {
                         String hex = encodedText.substring(i + 1, i + 3);
                         try {
                             int value = Integer.parseInt(hex, 16);
-                            byteResult.write(value);
-                            i += 2; // Skip the hex digits
+                            result.append((char) value);
+                            i += 2;
                         } catch (NumberFormatException e) {
-                            byteResult.write(c);
+                            result.append(c);
                         }
                     } else {
-                        byteResult.write(c);
+                        result.append(c);
                     }
                 }
-                case '_' -> // In RFC 2047, underscore represents space
-                        byteResult.write(' ');
-                default -> {
-                    try {
-                        byteResult.write(c & 0xFF);
-                    } catch (Exception e) {
-                        byteResult.write('?'); // Fallback for unprintable characters
-                    }
-                }
+                case '_' -> result.append(' ');
+                default -> result.append(c);
             }
         }
 
-        byte[] bytes = byteResult.toByteArray();
-        return decodeWithCharset(bytes, charset);
-    }
-
-    private static boolean isValidJakartaMailPart(Object part) {
-        if (part == null) return false;
+        byte[] bytes = result.toString().getBytes(StandardCharsets.ISO_8859_1);
         try {
-            Class<?> partInterface = Class.forName("jakarta.mail.Part");
-            return partInterface.isInstance(part);
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
-
-    private static boolean isValidJakartaMailMultipart(Object multipart) {
-        if (multipart == null) return false;
-        try {
-            Class<?> multipartInterface = Class.forName("jakarta.mail.Multipart");
-            return multipartInterface.isInstance(multipart);
-        } catch (ClassNotFoundException e) {
-            return false;
+            return new String(bytes, Charset.forName(charset));
+        } catch (Exception e) {
+            return new String(bytes, StandardCharsets.UTF_8);
         }
     }
 
@@ -2064,14 +1930,11 @@ public class EmlToPdf {
                 throws IOException {
             String lowerString = string.toLowerCase();
 
-            // Look for attachment section start marker
             if (lowerString.contains("attachments (")) {
                 isInAttachmentSection = true;
                 attachmentSectionFound = true;
             }
 
-            // Look for attachment section end markers (common patterns that indicate end of
-            // attachments)
             if (isInAttachmentSection
                     && (lowerString.contains("</body>")
                             || lowerString.contains("</html>")
