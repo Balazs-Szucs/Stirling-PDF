@@ -50,7 +50,6 @@ import lombok.experimental.UtilityClass;
 
 import stirling.software.common.model.api.converters.EmlToPdfRequest;
 import stirling.software.common.model.api.converters.HTMLToPdfRequest;
-import stirling.software.common.service.CustomPDFDocumentFactory;
 
 @UtilityClass
 public class EmlToPdf {
@@ -1784,28 +1783,9 @@ public class EmlToPdf {
 
     private static @NotNull PDRectangle getPdRectangle(PDPage page, float x, float y) {
         PDRectangle cropBox = page.getCropBox();
-        int rotation = page.getRotation();
 
         float pdfX = x;
         float pdfY = cropBox.getHeight() - y;
-
-        switch (rotation) {
-            case 90 -> {
-                float temp90 = pdfX;
-                pdfX = pdfY;
-                pdfY = cropBox.getWidth() - temp90;
-            }
-            case 180 -> {
-                pdfX = cropBox.getWidth() - pdfX;
-                pdfY = cropBox.getHeight() - pdfY;
-            }
-            case 270 -> {
-                float temp270 = pdfX;
-                pdfX = cropBox.getHeight() - pdfY;
-                pdfY = temp270;
-            }
-            default -> {}
-        }
 
         float iconWidth = StyleConstants.ATTACHMENT_ICON_WIDTH;
         float iconHeight = StyleConstants.ATTACHMENT_ICON_HEIGHT;
