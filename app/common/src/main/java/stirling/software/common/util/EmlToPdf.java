@@ -584,15 +584,40 @@ public class EmlToPdf {
     }
 
     private static String extractFilenameFromDisposition(String disposition) {
-        if (disposition.contains("filename=")) {
-            int filenameStart = disposition.toLowerCase().indexOf("filename=") + 9;
-            int filenameEnd = disposition.indexOf(";", filenameStart);
-            if (filenameEnd == -1) filenameEnd = disposition.length();
-            String filename = disposition.substring(filenameStart, filenameEnd).trim();
-            filename = filename.replaceAll("^\"|\"$", "");
-            return safeMimeDecode(filename);
+        if (disposition == null || !disposition.contains("filename=")) {
+            return "";
         }
-        return "";
+
+        if (disposition.toLowerCase().contains("filename*=")) {
+            int filenameStarStart = disposition.toLowerCase().indexOf("filename*=") + 10;
+            int filenameStarEnd = disposition.indexOf(";", filenameStarStart);
+            if (filenameStarEnd == -1) filenameStarEnd = disposition.length();
+            String extendedFilename =
+                    disposition.substring(filenameStarStart, filenameStarEnd).trim();
+            extendedFilename = extendedFilename.replaceAll("^\"|\"$", "");
+
+            if (extendedFilename.contains("'")) {
+                String[] parts = extendedFilename.split("'", 3);
+                if (parts.length == 3) {
+                    return decodeUrlEncoded(parts[2]);
+                }
+            }
+        }
+
+        int filenameStart = disposition.toLowerCase().indexOf("filename=") + 9;
+        int filenameEnd = disposition.indexOf(";", filenameStart);
+        if (filenameEnd == -1) filenameEnd = disposition.length();
+        String filename = disposition.substring(filenameStart, filenameEnd).trim();
+        filename = filename.replaceAll("^\"|\"$", "");
+        return safeMimeDecode(filename);
+    }
+
+    private static String decodeUrlEncoded(String encoded) {
+        try {
+            return java.net.URLDecoder.decode(encoded, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return encoded; // Return original if decoding fails
+        }
     }
 
     private static void addAttachmentToInfo(
@@ -1200,17 +1225,27 @@ public class EmlToPdf {
             String filename = (String) getFileName.invoke(part);
             String contentType = (String) getContentType.invoke(part);
 
+            String normalizedDisposition =
+                    disposition != null ? ((String) disposition).toLowerCase(Locale.ROOT) : null;
+
             if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_PLAIN)
-                    && disposition == null) {
-                content.setTextBody((String) getContent.invoke(part));
-            } else if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_HTML)
-                    && disposition == null) {
-                String htmlBody = (String) getContent.invoke(part);
-                if (customHtmlSanitizer != null) {
-                    htmlBody = customHtmlSanitizer.sanitize(htmlBody);
+                    && normalizedDisposition == null) {
+                Object partContent = getContent.invoke(part);
+                if (partContent instanceof String stringContent) {
+                    content.setTextBody(stringContent);
                 }
-                content.setHtmlBody(htmlBody);
-            } else if (MimeConstants.DISPOSITION_ATTACHMENT.equalsIgnoreCase((String) disposition)
+            } else if ((Boolean) isMimeType.invoke(part, MimeConstants.TEXT_HTML)
+                    && normalizedDisposition == null) {
+                Object partContent = getContent.invoke(part);
+                if (partContent instanceof String stringContent) {
+                    String htmlBody = stringContent;
+                    if (customHtmlSanitizer != null) {
+                        htmlBody = customHtmlSanitizer.sanitize(htmlBody);
+                    }
+                    content.setHtmlBody(htmlBody);
+                }
+            } else if ((normalizedDisposition != null
+                            && normalizedDisposition.contains(MimeConstants.DISPOSITION_ATTACHMENT))
                     || (filename != null && !filename.trim().isEmpty())) {
 
                 content.setAttachmentCount(content.getAttachmentCount() + 1);
@@ -1223,19 +1258,22 @@ public class EmlToPdf {
                     try {
                         String[] contentIdHeaders =
                                 (String[]) getHeader.invoke(part, MimeConstants.HEADER_CONTENT_ID);
-                        if (contentIdHeaders != null
-                                && contentIdHeaders.length > 0
-                                && contentIdHeaders[0] != null
-                                && !contentIdHeaders[0].trim().isEmpty()) {
-                            attachment.setEmbedded(true);
-                            String contentId = contentIdHeaders[0].trim();
-                            if (contentId.startsWith("<") && contentId.endsWith(">")) {
-                                contentId = contentId.substring(1, contentId.length() - 1);
+                        if (contentIdHeaders != null) {
+                            for (String contentIdHeader : contentIdHeaders) {
+                                if (contentIdHeader != null && !contentIdHeader.trim().isEmpty()) {
+                                    attachment.setEmbedded(true);
+                                    String contentId = contentIdHeader.trim();
+                                    if (contentId.startsWith("<")
+                                            && contentId.endsWith(">")
+                                            && contentId.length() > 2) {
+                                        contentId = contentId.substring(1, contentId.length() - 1);
+                                    }
+                                    attachment.setContentId(contentId);
+                                    break;
+                                }
                             }
-                            attachment.setContentId(contentId);
                         }
                     } catch (ReflectiveOperationException e) {
-                        // Ignore errors in content ID extraction
                     }
 
                     if ((request != null && request.isIncludeAttachments())
@@ -1245,21 +1283,42 @@ public class EmlToPdf {
                             byte[] attachmentData = null;
 
                             if (attachmentContent instanceof InputStream inputStream) {
-                                try {
-                                    attachmentData = inputStream.readAllBytes();
+                                try (InputStream stream = inputStream) {
+                                    attachmentData = stream.readAllBytes();
                                 } catch (IOException | OutOfMemoryError e) {
                                     if (attachment.isEmbedded()) {
-                                        attachmentData = new byte[0]; // Avoid null data
+                                        attachmentData = new byte[0];
                                     } else {
-                                        throw e; // Rethrow for non-embedded attachments
+                                        throw e;
                                     }
-                                } finally {
-                                    inputStream.close();
                                 }
                             } else if (attachmentContent instanceof byte[] byteArray) {
                                 attachmentData = byteArray;
                             } else if (attachmentContent instanceof String stringContent) {
-                                attachmentData = stringContent.getBytes(StandardCharsets.UTF_8);
+                                Charset charset = StandardCharsets.UTF_8;
+                                if (contentType != null
+                                        && contentType.toLowerCase().contains("charset=")) {
+                                    try {
+                                        String charsetName =
+                                                contentType
+                                                        .substring(
+                                                                contentType
+                                                                                .toLowerCase()
+                                                                                .indexOf("charset=")
+                                                                        + 8)
+                                                        .split("[;\\s]")[0]
+                                                        .trim();
+                                        if (charsetName.startsWith("\"")
+                                                && charsetName.endsWith("\"")) {
+                                            charsetName =
+                                                    charsetName.substring(
+                                                            1, charsetName.length() - 1);
+                                        }
+                                        charset = Charset.forName(charsetName);
+                                    } catch (Exception e) {
+                                    }
+                                }
+                                attachmentData = stringContent.getBytes(charset);
                             }
 
                             if (attachmentData != null) {
@@ -1280,8 +1339,6 @@ public class EmlToPdf {
                                 }
                             }
                         } catch (ReflectiveOperationException | IOException e) {
-                            // Ignore errors in content extraction
-
                         }
                     }
                     content.getAttachments().add(attachment);
@@ -1297,15 +1354,18 @@ public class EmlToPdf {
                         }
                     }
                 } catch (ReflectiveOperationException e) {
-                    // Ignore errors in multipart processing
                 }
             }
 
         } catch (ReflectiveOperationException | RuntimeException e) {
             if (request != null && request.isIncludeAttachments()) {
+                String sanitizedMessage =
+                        customHtmlSanitizer != null
+                                ? customHtmlSanitizer.sanitize(e.getMessage())
+                                : escapeHtml(e.getMessage());
                 content.setHtmlBody(
                         "<div class=\"error\">Error processing part: "
-                                + escapeHtml(e.getMessage())
+                                + sanitizedMessage
                                 + "</div>");
             } else {
                 content.setHtmlBody("<div class=\"error\">Error processing part</div>");
@@ -1483,6 +1543,11 @@ public class EmlToPdf {
 
             document.save(outputStream);
             return outputStream.toByteArray();
+        } catch (RuntimeException e) {
+            throw new IOException(
+                    "Invalid PDF structure or processing error: " + e.getMessage(), e);
+        } catch (Exception e) {
+            throw new IOException("Error attaching files to PDF: " + e.getMessage(), e);
         }
     }
 
@@ -1541,8 +1606,13 @@ public class EmlToPdf {
     }
 
     private static void addAttachmentsToDocument(
-            PDDocument document, List<MultipartFile> attachments) {
+            PDDocument document, List<MultipartFile> attachments) throws IOException {
         PDDocumentCatalog catalog = document.getDocumentCatalog();
+
+        if (catalog == null) {
+            throw new IOException("PDF document catalog is not accessible");
+        }
+
         PDDocumentNameDictionary documentNames = catalog.getNames();
         if (documentNames == null) {
             documentNames = new PDDocumentNameDictionary(catalog);
@@ -1555,11 +1625,8 @@ public class EmlToPdf {
             documentNames.setEmbeddedFiles(embeddedFilesTree);
         }
 
-        Map<String, PDComplexFileSpecification> existingNames;
-        try {
-            Map<String, PDComplexFileSpecification> names = embeddedFilesTree.getNames();
-            existingNames = names != null ? new HashMap<>(names) : new HashMap<>();
-        } catch (IOException e) {
+        Map<String, PDComplexFileSpecification> existingNames = embeddedFilesTree.getNames();
+        if (existingNames == null) {
             existingNames = new HashMap<>();
         }
 
@@ -1569,32 +1636,35 @@ public class EmlToPdf {
                 filename = "attachment_" + System.currentTimeMillis();
             }
 
-            String uniqueFilename = ensureUniqueFilename(filename, existingNames.keySet());
+            String normalizedFilename =
+                    java.text.Normalizer.normalize(filename, java.text.Normalizer.Form.NFC);
+            String uniqueFilename =
+                    ensureUniqueFilename(normalizedFilename, existingNames.keySet());
 
-            try {
-                PDEmbeddedFile embeddedFile =
-                        new PDEmbeddedFile(document, attachment.getInputStream());
-                embeddedFile.setSize((int) attachment.getSize());
-                embeddedFile.setCreationDate(new GregorianCalendar());
-                embeddedFile.setModDate(new GregorianCalendar());
+            PDEmbeddedFile embeddedFile = new PDEmbeddedFile(document, attachment.getInputStream());
+            embeddedFile.setSize((int) attachment.getSize());
 
-                String contentType = attachment.getContentType();
-                if (contentType != null && !contentType.trim().isEmpty()) {
-                    embeddedFile.setSubtype(contentType);
-                }
+            GregorianCalendar currentTime = new GregorianCalendar();
+            embeddedFile.setCreationDate(currentTime);
+            embeddedFile.setModDate(currentTime);
 
-                PDComplexFileSpecification fileSpecification = new PDComplexFileSpecification();
-                fileSpecification.setFile(uniqueFilename);
-                fileSpecification.setFileUnicode(uniqueFilename);
-                fileSpecification.setEmbeddedFile(embeddedFile);
-                fileSpecification.setEmbeddedFileUnicode(embeddedFile);
-
-                existingNames.put(uniqueFilename, fileSpecification);
-            } catch (IOException e) {
+            String contentType = attachment.getContentType();
+            if (contentType != null && !contentType.trim().isEmpty()) {
+                embeddedFile.setSubtype(contentType);
             }
+
+            PDComplexFileSpecification fileSpecification = new PDComplexFileSpecification();
+            fileSpecification.setFile(uniqueFilename);
+            fileSpecification.setFileUnicode(uniqueFilename);
+            fileSpecification.setEmbeddedFile(embeddedFile);
+            fileSpecification.setEmbeddedFileUnicode(embeddedFile);
+
+            existingNames.put(uniqueFilename, fileSpecification);
         }
 
         embeddedFilesTree.setNames(existingNames);
+        documentNames.setEmbeddedFiles(embeddedFilesTree);
+        catalog.setNames(documentNames);
     }
 
     private static String ensureUniqueFilename(String filename, Set<String> existingNames) {
@@ -1653,23 +1723,46 @@ public class EmlToPdf {
         PDAnnotationFileAttachment fileAnnotation = new PDAnnotationFileAttachment();
 
         PDRectangle rect = getPdRectangle(page, x, y);
+
+        PDRectangle mediaBox = page.getMediaBox();
+        if (rect.getLowerLeftX() < mediaBox.getLowerLeftX()
+                || rect.getLowerLeftY() < mediaBox.getLowerLeftY()
+                || rect.getUpperRightX() > mediaBox.getUpperRightX()
+                || rect.getUpperRightY() > mediaBox.getUpperRightY()) {
+            float adjustedX =
+                    Math.max(
+                            mediaBox.getLowerLeftX(),
+                            Math.min(
+                                    rect.getLowerLeftX(),
+                                    mediaBox.getUpperRightX() - rect.getWidth()));
+            float adjustedY =
+                    Math.max(
+                            mediaBox.getLowerLeftY(),
+                            Math.min(
+                                    rect.getLowerLeftY(),
+                                    mediaBox.getUpperRightY() - rect.getHeight()));
+            rect = new PDRectangle(adjustedX, adjustedY, rect.getWidth(), rect.getHeight());
+        }
+
         fileAnnotation.setRectangle(rect);
+
+        fileAnnotation.setPrinted(false);
+        fileAnnotation.setHidden(false);
+        fileAnnotation.setNoView(false);
+        fileAnnotation.setNoZoom(true);
+        fileAnnotation.setNoRotate(true);
 
         try {
             PDAppearanceDictionary appearance = new PDAppearanceDictionary();
             PDAppearanceStream normalAppearance = new PDAppearanceStream(document);
-            normalAppearance.setBBox(new PDRectangle(0, 0, 1, 1)); // Minimal bounding box
+
+            normalAppearance.setBBox(new PDRectangle(0, 0, rect.getWidth(), rect.getHeight()));
 
             appearance.setNormalAppearance(normalAppearance);
             fileAnnotation.setAppearance(appearance);
         } catch (RuntimeException e) {
             fileAnnotation.setAppearance(null);
         }
-
-        fileAnnotation.setInvisible(true);
-        fileAnnotation.setHidden(false); // Must be false to remain clickable
-        fileAnnotation.setNoView(false); // Must be false to remain clickable
-        fileAnnotation.setPrinted(false);
 
         PDEmbeddedFilesNameTreeNode efTree =
                 document.getDocumentCatalog().getNames().getEmbeddedFiles();
@@ -1683,30 +1776,46 @@ public class EmlToPdf {
             }
         }
 
-        fileAnnotation.setContents("Click to open: " + attachment.getFilename());
+        fileAnnotation.setContents("Embedded attachment: " + attachment.getFilename());
         fileAnnotation.setAnnotationName("EmbeddedFile_" + attachment.getEmbeddedFilename());
 
         page.getAnnotations().add(fileAnnotation);
     }
 
     private static @NotNull PDRectangle getPdRectangle(PDPage page, float x, float y) {
-        PDRectangle mediaBox = page.getMediaBox();
+        PDRectangle cropBox = page.getCropBox();
+        int rotation = page.getRotation();
 
-        float pdfY;
-        try {
-            pdfY = mediaBox.getUpperRightY() - y;
-        } catch (Exception e) {
-            pdfY = mediaBox.getHeight() - y;
+        float pdfX = x;
+        float pdfY = cropBox.getHeight() - y;
+
+        switch (rotation) {
+            case 90 -> {
+                float temp90 = pdfX;
+                pdfX = pdfY;
+                pdfY = cropBox.getWidth() - temp90;
+            }
+            case 180 -> {
+                pdfX = cropBox.getWidth() - pdfX;
+                pdfY = cropBox.getHeight() - pdfY;
+            }
+            case 270 -> {
+                float temp270 = pdfX;
+                pdfX = cropBox.getHeight() - pdfY;
+                pdfY = temp270;
+            }
+            default -> {}
         }
 
-        float iconWidth =
-                StyleConstants.ATTACHMENT_ICON_WIDTH; // Keep original size for clickability
-        float iconHeight =
-                StyleConstants.ATTACHMENT_ICON_HEIGHT; // Keep original size for clickability
+        float iconWidth = StyleConstants.ATTACHMENT_ICON_WIDTH;
+        float iconHeight = StyleConstants.ATTACHMENT_ICON_HEIGHT;
+
+        float paddingX = 2.0f;
+        float paddingY = 2.0f;
 
         return new PDRectangle(
-                x + StyleConstants.ANNOTATION_X_OFFSET,
-                pdfY - iconHeight + StyleConstants.ANNOTATION_Y_OFFSET,
+                pdfX + StyleConstants.ANNOTATION_X_OFFSET + paddingX,
+                pdfY - iconHeight + StyleConstants.ANNOTATION_Y_OFFSET + paddingY,
                 iconWidth,
                 iconHeight);
     }
@@ -1714,7 +1823,7 @@ public class EmlToPdf {
     private static String formatEmailDate(Date date) {
         if (date == null) return "";
         SimpleDateFormat formatter =
-                new SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a", Locale.ENGLISH);
+                new SimpleDateFormat("EEE, MMM d, yyyy 'at' h:mm a z", Locale.ENGLISH);
         return formatter.format(date);
     }
 
@@ -1765,11 +1874,23 @@ public class EmlToPdf {
 
         try {
             StringBuilder result = new StringBuilder();
-            Matcher matcher = MimeConstants.MIME_ENCODED_PATTERN.matcher(encodedText);
+            Pattern concatenatedPattern =
+                    Pattern.compile(
+                            "(=\\?[^?]+\\?[BbQq]\\?[^?]*\\?=)(\\s*=\\?[^?]+\\?[BbQq]\\?[^?]*\\?=)+");
+            Matcher concatenatedMatcher = concatenatedPattern.matcher(encodedText);
+            String processedText =
+                    concatenatedMatcher.replaceAll(
+                            match ->
+                                    match.group()
+                                            .replaceAll(
+                                                    "\\s+(?==\\?)",
+                                                    "")); // Remove spaces between encoded words
+
+            Matcher matcher = MimeConstants.MIME_ENCODED_PATTERN.matcher(processedText);
             int lastEnd = 0;
 
             while (matcher.find()) {
-                result.append(encodedText, lastEnd, matcher.start());
+                result.append(processedText, lastEnd, matcher.start());
 
                 String charset = matcher.group(1);
                 String encoding = matcher.group(2).toUpperCase();
@@ -1791,21 +1912,21 @@ public class EmlToPdf {
                                     yield new String(decodedBytes, targetCharset);
                                 }
                                 case "Q" -> decodeQuotedPrintable(encodedValue, charset);
-                                default -> matcher.group(0);
+                                default -> matcher.group(0); // Return original if unknown encoding
                             };
                     result.append(decodedValue);
                 } catch (RuntimeException e) {
-                    result.append(matcher.group(0));
+                    result.append(matcher.group(0)); // Keep original on decode error
                 }
 
                 lastEnd = matcher.end();
             }
 
-            result.append(encodedText.substring(lastEnd));
+            result.append(processedText.substring(lastEnd));
 
             return result.toString();
         } catch (Exception e) {
-            return encodedText;
+            return encodedText; // Return original on any parsing error
         }
     }
 
@@ -1824,18 +1945,25 @@ public class EmlToPdf {
                         } catch (NumberFormatException e) {
                             result.append(c);
                         }
+                    } else if (i + 1 == encodedText.length()
+                            || (i + 2 == encodedText.length()
+                                    && encodedText.charAt(i + 1) == '\n')) {
+                        if (i + 1 < encodedText.length() && encodedText.charAt(i + 1) == '\n') {
+                            i++; // Skip the newline too
+                        }
                     } else {
                         result.append(c);
                     }
                 }
-                case '_' -> result.append(' ');
+                case '_' -> result.append(' '); // Space encoding in Q encoding
                 default -> result.append(c);
             }
         }
 
         byte[] bytes = result.toString().getBytes(StandardCharsets.ISO_8859_1);
         try {
-            return new String(bytes, Charset.forName(charset));
+            Charset targetCharset = Charset.forName(charset);
+            return new String(bytes, targetCharset);
         } catch (Exception e) {
             return new String(bytes, StandardCharsets.UTF_8);
         }
@@ -1906,12 +2034,32 @@ public class EmlToPdf {
         private boolean isInAttachmentSection;
         private boolean attachmentSectionFound;
 
+        private static final Pattern ATTACHMENT_SECTION_PATTERN =
+                Pattern.compile("attachments\\s*\\(\\d+\\)", Pattern.CASE_INSENSITIVE);
+
         public AttachmentMarkerPositionFinder() {
             super();
             this.currentPageIndex = 0;
             this.sortByPosition = false;
             this.isInAttachmentSection = false;
             this.attachmentSectionFound = false;
+        }
+
+        @Override
+        public String getText(PDDocument document) throws IOException {
+            super.getText(document);
+
+            if (sortByPosition) {
+                positions.sort(
+                        (a, b) -> {
+                            int pageCompare = Integer.compare(a.getPageIndex(), b.getPageIndex());
+                            if (pageCompare != 0) return pageCompare;
+                            return Float.compare(
+                                    b.getY(), a.getY()); // Descending Y per PDF coordinate system
+                        });
+            }
+
+            return ""; // Return empty string as we only need positions
         }
 
         @Override
@@ -1930,7 +2078,7 @@ public class EmlToPdf {
                 throws IOException {
             String lowerString = string.toLowerCase();
 
-            if (lowerString.contains("attachments (")) {
+            if (ATTACHMENT_SECTION_PATTERN.matcher(lowerString).find()) {
                 isInAttachmentSection = true;
                 attachmentSectionFound = true;
             }
